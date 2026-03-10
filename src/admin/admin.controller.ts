@@ -2,11 +2,15 @@ import { Body, Controller, Get, Param, Patch, Query, UseGuards, NotFoundExceptio
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { AdminGuard } from '../auth/admin.guard';
 import { UsersService } from '../users/users.service';
+import { PrismaService } from '../prisma/prisma.service';
 
 @Controller('admin')
 @UseGuards(JwtAuthGuard, AdminGuard)
 export class AdminController {
-  constructor(private usersService: UsersService) {}
+  constructor(
+    private usersService: UsersService,
+    private prisma: PrismaService,
+  ) {}
 
   @Get('users')
   async listUsers(
@@ -58,5 +62,127 @@ export class AdminController {
   @Get('stats')
   async getStats() {
     return this.usersService.getStats();
+  }
+
+  @Get('orders')
+  async listOrders() {
+    const orders = await this.prisma.order.findMany({
+      orderBy: { createdAt: 'desc' },
+      include: { user: { select: { id: true, name: true, email: true } } },
+    });
+    return orders.map((o) => ({
+      id: o.id,
+      user: o.user.name,
+      userEmail: o.user.email,
+      type: o.type,
+      amount: o.amount,
+      method: o.method,
+      date: o.createdAt.toISOString(),
+    }));
+  }
+
+  @Get('blog')
+  async listBlog() {
+    const posts = await this.prisma.blogPost.findMany({
+      orderBy: { createdAt: 'desc' },
+    });
+    return posts.map((p) => ({
+      id: p.id,
+      title: p.title,
+      status: p.status,
+      date: p.createdAt.toISOString(),
+      content: p.content,
+    }));
+  }
+
+  @Get('knowledge-base')
+  async listKnowledgeBase() {
+    const categories = await this.prisma.knowledgeCategory.findMany({
+      orderBy: { title: 'asc' },
+      include: { entries: { orderBy: { createdAt: 'asc' } } },
+    });
+    return categories.map((c) => ({
+      id: c.id,
+      title: c.title,
+      entries: c.entries.map((e) => ({ id: e.id, content: e.content })),
+    }));
+  }
+
+  @Get('questions')
+  async listQuestions() {
+    const questions = await this.prisma.question.findMany({
+      orderBy: { createdAt: 'desc' },
+      include: { user: { select: { id: true, name: true, email: true } } },
+    });
+    return questions.map((q) => ({
+      id: q.id,
+      user: q.user.name,
+      userEmail: q.user.email,
+      question: q.question,
+      answer: q.answer ?? null,
+      status: q.status,
+      date: q.createdAt.toISOString(),
+    }));
+  }
+
+  @Get('questions/:id')
+  async getQuestion(@Param('id') id: string) {
+    const q = await this.prisma.question.findUnique({
+      where: { id },
+      include: { user: { select: { id: true, name: true, email: true } } },
+    });
+    if (!q) throw new NotFoundException('Question not found');
+    return {
+      id: q.id,
+      user: q.user.name,
+      userEmail: q.user.email,
+      question: q.question,
+      answer: q.answer ?? null,
+      status: q.status,
+      date: q.createdAt.toISOString(),
+    };
+  }
+
+  @Patch('questions/:id')
+  async updateQuestion(
+    @Param('id') id: string,
+    @Body() body: { answer?: string },
+  ) {
+    const text = typeof body.answer === 'string' ? body.answer.trim() : '';
+    const question = await this.prisma.question.update({
+      where: { id },
+      data: {
+        answer: text || null,
+        status: text ? 'answered' : undefined,
+      },
+      include: { user: { select: { id: true, name: true, email: true } } },
+    });
+    return {
+      id: question.id,
+      user: question.user.name,
+      userEmail: question.user.email,
+      question: question.question,
+      answer: question.answer ?? null,
+      status: question.status,
+      date: question.createdAt.toISOString(),
+    };
+  }
+
+  @Get('reports')
+  async listReports() {
+    const reports = await this.prisma.report.findMany({
+      orderBy: { createdAt: 'desc' },
+      include: { user: { select: { id: true, name: true, email: true } } },
+    });
+    return reports.map((r) => ({
+      id: r.id,
+      user: r.user.name,
+      userEmail: r.user.email,
+      type: r.type,
+      title: r.title,
+      status: 'Generado',
+      date: r.createdAt.toISOString(),
+      content: r.content,
+    }));
   }
 }
