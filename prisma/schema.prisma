@@ -1,0 +1,68 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  admin
+  client
+}
+
+enum SubscriptionStatus {
+  active
+  inactive
+  cancelled
+}
+
+model User {
+  id                 String             @id @default(cuid())
+  email              String             @unique
+  name               String
+  passwordHash       String             @map("password_hash")
+  role               UserRole           @default(client)
+  isActive           Boolean            @default(true) @map("is_active")
+  subscriptionStatus SubscriptionStatus @default(inactive) @map("subscription_status")
+  birthDate          String?            @map("birth_date")
+  birthPlace         String?            @map("birth_place")
+  birthTime          String?            @map("birth_time")
+  createdAt          DateTime           @default(now()) @map("created_at")
+  updatedAt          DateTime           @updatedAt @map("updated_at")
+  reports            Report[]
+  messages           Message[]
+  notifications      Notification[]
+}
+
+model Report {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String   @map("type")
+  title     String
+  content   String?  @db.Text
+  createdAt DateTime @default(now()) @map("created_at")
+}
+
+model Message {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String   @map("type")
+  content   String   @db.Text
+  monthLabel String? @map("month_label")
+  createdAt DateTime @default(now()) @map("created_at")
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title     String
+  body      String?  @db.Text
+  category  String?
+  read      Boolean  @default(false)
+  createdAt DateTime @default(now()) @map("created_at")
+}

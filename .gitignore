@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+
+# Build
+dist/
+build/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Prisma
+# Uncomment if you want to ignore generated client in custom path:
+# node_modules/.prisma/
+
+# Test / Coverage
+coverage/
+.nyc_output/
+
+# Misc
+*.pid
+.cache/
