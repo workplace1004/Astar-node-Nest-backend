@@ -4,8 +4,9 @@ import { PrismaModule } from './prisma/prisma.module';
 import { UsersModule } from './users/users.module';
 import { AdminModule } from './admin/admin.module';
 import { PortalModule } from './portal/portal.module';
+import { BirthChartModule } from './birth-chart/birth-chart.module';
 
 @Module({
-  imports: [PrismaModule, UsersModule, AuthModule, AdminModule, PortalModule],
+  imports: [PrismaModule, UsersModule, AuthModule, AdminModule, PortalModule, BirthChartModule],
 })
 export class AppModule {}
