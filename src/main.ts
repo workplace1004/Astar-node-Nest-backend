@@ -1,12 +1,12 @@
 import { NestFactory } from '@nestjs/core';
+import { ExpressAdapter } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
-import type { Request, Response, NextFunction } from 'express';
+import express from 'express';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
-  const port = process.env.PORT != null ? parseInt(process.env.PORT, 10) : 3000;
+  const expressApp = express();
 
-  const corsOrigin = process.env.CORS_ORIGIN;
+  const corsOrigin = process.env.CORS_ORIGIN ?? '';
   const allowedOrigins = corsOrigin
     ? corsOrigin.split(',').map((o) => o.trim().replace(/\/$/, '')).filter(Boolean)
     : [];
@@ -16,8 +16,8 @@ async function bootstrap() {
     return !!origin && allowedOrigins.includes(origin);
   };
 
-  // CORS middleware first – runs on every request and sets headers
-  app.use((req: Request, res: Response, next: NextFunction) => {
+  // CORS must be the very first middleware – handle preflight and set headers on all responses
+  expressApp.use((req, res, next) => {
     const origin = req.headers.origin as string | undefined;
     if (origin && allowOrigin(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
@@ -27,21 +27,14 @@ async function bootstrap() {
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, Accept');
     res.setHeader('Access-Control-Max-Age', '86400');
     if (req.method === 'OPTIONS') {
-      return res.status(204).end();
+      res.status(204).end();
+      return;
     }
     next();
   });
 
-  app.enableCors({
-    origin: (requestOrigin, callback) => {
-      callback(null, allowOrigin(requestOrigin));
-    },
-    credentials: true,
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
-    optionsSuccessStatus: 204,
-    preflightContinue: false,
-  });
+  const app = await NestFactory.create(AppModule, new ExpressAdapter(expressApp));
+  const port = process.env.PORT != null ? parseInt(process.env.PORT, 10) : 3000;
 
   await app.listen(port);
   console.log(`Backend running at http://localhost:${port}`);
