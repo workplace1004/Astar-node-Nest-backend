@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, BadRequestException, UnauthorizedException } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../prisma/prisma.service';
 import { UserResponse } from './user.interface';
@@ -154,5 +154,58 @@ export class UsersService {
       data: { isActive },
     });
     return this.toResponse(user);
+  }
+
+  async updateProfile(
+    userId: string,
+    data: { name?: string; email?: string },
+  ): Promise<UserResponse> {
+    const existing = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!existing) throw new UnauthorizedException('User not found');
+
+    const updateData: { name?: string; email?: string } = {};
+    if (typeof data.name === 'string' && data.name.trim()) {
+      updateData.name = data.name.trim();
+    }
+    if (typeof data.email === 'string' && data.email.trim()) {
+      const newEmail = data.email.trim().toLowerCase();
+      if (newEmail !== existing.email) {
+        const taken = await this.prisma.user.findUnique({ where: { email: newEmail } });
+        if (taken) throw new BadRequestException('Este correo ya está en uso.');
+        updateData.email = newEmail;
+      }
+    }
+    if (Object.keys(updateData).length === 0) return this.toResponse(existing);
+
+    const user = await this.prisma.user.update({
+      where: { id: userId },
+      data: updateData,
+    });
+    return this.toResponse(user);
+  }
+
+  async updatePassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<void> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, passwordHash: true },
+    });
+    if (!user) throw new UnauthorizedException('User not found');
+
+    const valid = await this.validatePassword(user, currentPassword);
+    if (!valid) throw new UnauthorizedException('Contraseña actual incorrecta.');
+
+    if (newPassword.length < 6) {
+      throw new BadRequestException('La nueva contraseña debe tener al menos 6 caracteres.');
+    }
+
+    const passwordHash = await bcrypt.hash(newPassword, 10);
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { passwordHash },
+    });
   }
 }

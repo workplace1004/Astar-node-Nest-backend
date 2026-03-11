@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards, NotFoundException } from '@nestjs/common';
+import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards, NotFoundException } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { AdminGuard } from '../auth/admin.guard';
 import { UsersService } from '../users/users.service';
@@ -95,6 +95,68 @@ export class AdminController {
     }));
   }
 
+  @Get('blog/:id')
+  async getBlog(@Param('id') id: string) {
+    const post = await this.prisma.blogPost.findUnique({
+      where: { id },
+    });
+    if (!post) throw new NotFoundException('Blog post not found');
+    return {
+      id: post.id,
+      title: post.title,
+      status: post.status,
+      date: post.createdAt.toISOString(),
+      content: post.content,
+    };
+  }
+
+  @Post('blog')
+  async createBlog(@Body() body: { title: string; content: string; status?: string }) {
+    const title = typeof body?.title === 'string' ? body.title.trim() : '';
+    const content = typeof body?.content === 'string' ? body.content : '';
+    const status = body?.status === 'published' ? 'published' : 'draft';
+    if (!title) throw new NotFoundException('Title is required');
+    const post = await this.prisma.blogPost.create({
+      data: { title, content, status },
+    });
+    return {
+      id: post.id,
+      title: post.title,
+      status: post.status,
+      date: post.createdAt.toISOString(),
+      content: post.content,
+    };
+  }
+
+  @Patch('blog/:id')
+  async updateBlog(@Param('id') id: string, @Body() body: { title?: string; content?: string; status?: string }) {
+    const existing = await this.prisma.blogPost.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException('Blog post not found');
+    const data: { title?: string; content?: string; status?: string } = {};
+    if (typeof body?.title === 'string') data.title = body.title.trim();
+    if (typeof body?.content === 'string') data.content = body.content;
+    if (body?.status === 'published' || body?.status === 'draft') data.status = body.status;
+    const post = await this.prisma.blogPost.update({
+      where: { id },
+      data,
+    });
+    return {
+      id: post.id,
+      title: post.title,
+      status: post.status,
+      date: post.createdAt.toISOString(),
+      content: post.content,
+    };
+  }
+
+  @Delete('blog/:id')
+  async deleteBlog(@Param('id') id: string) {
+    const existing = await this.prisma.blogPost.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException('Blog post not found');
+    await this.prisma.blogPost.delete({ where: { id } });
+    return { deleted: true };
+  }
+
   @Get('knowledge-base')
   async listKnowledgeBase() {
     const categories = await this.prisma.knowledgeCategory.findMany({
@@ -106,6 +168,66 @@ export class AdminController {
       title: c.title,
       entries: c.entries.map((e) => ({ id: e.id, content: e.content })),
     }));
+  }
+
+  @Post('knowledge-base/categories')
+  async createKnowledgeCategory(@Body() body: { title: string }) {
+    const title = typeof body?.title === 'string' ? body.title.trim() : '';
+    if (!title) throw new NotFoundException('title is required');
+    const category = await this.prisma.knowledgeCategory.create({
+      data: { title },
+      include: { entries: true },
+    });
+    return {
+      id: category.id,
+      title: category.title,
+      entries: category.entries.map((e) => ({ id: e.id, content: e.content })),
+    };
+  }
+
+  @Post('knowledge-base/categories/:categoryId/entries')
+  async createKnowledgeEntry(
+    @Param('categoryId') categoryId: string,
+    @Body() body: { content: string },
+  ) {
+    const content = typeof body?.content === 'string' ? body.content.trim() : '';
+    if (!content) throw new NotFoundException('content is required');
+    const category = await this.prisma.knowledgeCategory.findUnique({
+      where: { id: categoryId },
+    });
+    if (!category) throw new NotFoundException('Category not found');
+    const entry = await this.prisma.knowledgeEntry.create({
+      data: { categoryId, content },
+    });
+    return { id: entry.id, content: entry.content };
+  }
+
+  @Patch('knowledge-base/entries/:id')
+  async updateKnowledgeEntry(
+    @Param('id') id: string,
+    @Body() body: { content: string },
+  ) {
+    const content = typeof body?.content === 'string' ? body.content.trim() : '';
+    if (!content) throw new NotFoundException('content is required');
+    const entry = await this.prisma.knowledgeEntry.findUnique({
+      where: { id },
+    });
+    if (!entry) throw new NotFoundException('Entry not found');
+    const updated = await this.prisma.knowledgeEntry.update({
+      where: { id },
+      data: { content },
+    });
+    return { id: updated.id, content: updated.content };
+  }
+
+  @Delete('knowledge-base/entries/:id')
+  async deleteKnowledgeEntry(@Param('id') id: string) {
+    const entry = await this.prisma.knowledgeEntry.findUnique({
+      where: { id },
+    });
+    if (!entry) throw new NotFoundException('Entry not found');
+    await this.prisma.knowledgeEntry.delete({ where: { id } });
+    return { deleted: true };
   }
 
   @Get('questions')
@@ -123,6 +245,64 @@ export class AdminController {
       status: q.status,
       date: q.createdAt.toISOString(),
     }));
+  }
+
+  @Get('notifications')
+  async getNotifications() {
+    const since = new Date();
+    since.setDate(since.getDate() - 7);
+
+    const [newQuestions, recentOrders] = await Promise.all([
+      this.prisma.question.findMany({
+        where: { status: 'new' },
+        orderBy: { createdAt: 'desc' },
+        take: 30,
+        include: { user: { select: { name: true, email: true } } },
+      }),
+      this.prisma.order.findMany({
+        where: { createdAt: { gte: since } },
+        orderBy: { createdAt: 'desc' },
+        take: 30,
+        include: { user: { select: { name: true } } },
+      }),
+    ]);
+
+    const notifications: Array<{
+      id: string;
+      type: string;
+      title: string;
+      description: string;
+      date: string;
+      link: string;
+      unread: boolean;
+    }> = [];
+
+    newQuestions.forEach((q) => {
+      notifications.push({
+        id: `q-${q.id}`,
+        type: 'question',
+        title: 'Nueva pregunta',
+        description: `${q.user.name} (${q.user.email})`,
+        date: q.createdAt.toISOString(),
+        link: '/admin/questions',
+        unread: true,
+      });
+    });
+
+    recentOrders.forEach((o) => {
+      notifications.push({
+        id: `o-${o.id}`,
+        type: 'order',
+        title: 'Nuevo pedido',
+        description: `${o.type} — ${o.amount} — ${o.user.name}`,
+        date: o.createdAt.toISOString(),
+        link: '/admin/orders',
+        unread: true,
+      });
+    });
+
+    notifications.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+    return { notifications: notifications.slice(0, 50) };
   }
 
   @Get('questions/:id')
@@ -190,7 +370,42 @@ export class AdminController {
       orderBy: { createdAt: 'desc' },
       include: { user: { select: { id: true, name: true, email: true } } },
     });
-    return reports.map((r) => ({
+    return reports.map((r) => this.mapReportToAdminItem(r));
+  }
+
+  @Get('reports/:id')
+  async getReport(@Param('id') id: string) {
+    const report = await this.prisma.report.findUnique({
+      where: { id },
+      include: { user: { select: { id: true, name: true, email: true } } },
+    });
+    if (!report) throw new NotFoundException('Report not found');
+    return this.mapReportToAdminItem(report);
+  }
+
+  @Patch('reports/:id')
+  async updateReport(
+    @Param('id') id: string,
+    @Body() body: { content?: string; title?: string },
+  ) {
+    const report = await this.prisma.report.findUnique({
+      where: { id },
+      include: { user: { select: { id: true, name: true, email: true } } },
+    });
+    if (!report) throw new NotFoundException('Report not found');
+    const data: { content?: string | null; title?: string } = {};
+    if (typeof body.content === 'string') data.content = body.content.trim() || null;
+    if (typeof body.title === 'string' && body.title.trim()) data.title = body.title.trim();
+    const updated = await this.prisma.report.update({
+      where: { id },
+      data,
+      include: { user: { select: { id: true, name: true, email: true } } },
+    });
+    return this.mapReportToAdminItem(updated);
+  }
+
+  private mapReportToAdminItem(r: { id: string; type: string; title: string; content: string | null; createdAt: Date; user: { name: string; email: string } }) {
+    return {
       id: r.id,
       user: r.user.name,
       userEmail: r.user.email,
@@ -199,7 +414,7 @@ export class AdminController {
       status: 'Generado',
       date: r.createdAt.toISOString(),
       content: r.content,
-    }));
+    };
   }
 
   @Post('messages')

@@ -48,4 +48,19 @@ export class AuthService {
     const user = await this.usersService.findById(userId);
     return user ? this.usersService.toPublic(user) : null;
   }
+
+  async updateProfile(
+    userId: string,
+    data: { name?: string; email?: string },
+  ): Promise<UserResponse> {
+    return this.usersService.updateProfile(userId, data);
+  }
+
+  async changePassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<void> {
+    await this.usersService.updatePassword(userId, currentPassword, newPassword);
+  }
 }

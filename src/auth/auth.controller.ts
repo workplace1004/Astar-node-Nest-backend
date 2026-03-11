@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Post, UnauthorizedException, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Patch, Post, UnauthorizedException, UseGuards } from '@nestjs/common';
 import { AuthService } from './auth.service';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
@@ -32,5 +32,26 @@ export class AuthController {
     const profile = await this.authService.me(user.id);
     if (!profile) throw new UnauthorizedException();
     return profile;
+  }
+
+  @Patch('me/password')
+  @UseGuards(JwtAuthGuard)
+  async changePassword(
+    @CurrentUser() user: { id: string },
+    @Body() body: { currentPassword: string; newPassword: string },
+  ) {
+    const current = body?.currentPassword ?? '';
+    const newPwd = body?.newPassword ?? '';
+    await this.authService.changePassword(user.id, current, newPwd);
+    return { ok: true };
+  }
+
+  @Patch('me')
+  @UseGuards(JwtAuthGuard)
+  async updateProfile(
+    @CurrentUser() user: { id: string },
+    @Body() body: { name?: string; email?: string },
+  ) {
+    return this.authService.updateProfile(user.id, body);
   }
 }
