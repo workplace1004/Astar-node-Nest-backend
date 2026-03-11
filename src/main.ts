@@ -15,28 +15,9 @@ async function bootstrap() {
   expressApp.use(express.json({ limit: '50mb' }));
   expressApp.use(express.urlencoded({ limit: '50mb', extended: true }));
 
-  // 2. CORS – default origins + env CORS_ORIGIN (comma-separated)
-  const defaultOrigins = [
-    'http://localhost:5173',
-    'http://localhost:5174',
-    'https://astra-firebase.vercel.app',
-    'https://www.astra-firebase.vercel.app',
-  ];
-
-  const envOrigins = process.env.CORS_ORIGIN
-    ? process.env.CORS_ORIGIN.split(',').map((o) => o.trim().replace(/\/$/, '')).filter(Boolean)
-    : [];
-
-  const allOrigins = [...new Set([...defaultOrigins, ...envOrigins])];
-
+  // 2. CORS – allow any origin so preflight always gets Access-Control-Allow-Origin (reflect request origin)
   const corsOptions: import('cors').CorsOptions = {
-    origin: (origin, callback) => {
-      if (allOrigins.length === 0) return callback(null, true);
-      if (!origin) return callback(null, true);
-      const normalized = origin.replace(/\/$/, '').toLowerCase();
-      const allowed = allOrigins.some((o) => o.replace(/\/$/, '').toLowerCase() === normalized);
-      callback(null, allowed);
-    },
+    origin: true,
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS', 'HEAD'],
     allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept', 'Origin'],
@@ -66,6 +47,6 @@ async function bootstrap() {
   await app.listen(port);
 
   console.log(`Backend running at http://localhost:${port}`);
-  console.log(`CORS allowed origins: ${allOrigins.join(', ')}`);
+  console.log('CORS: origin=true (reflect request origin)');
 }
 bootstrap();
