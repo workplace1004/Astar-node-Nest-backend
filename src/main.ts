@@ -1,7 +1,9 @@
 import { NestFactory } from '@nestjs/core';
 import { ExpressAdapter } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
-import express from 'express';
+import type { Request, Response, NextFunction } from 'express';
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const express = require('express') as typeof import('express');
 
 async function bootstrap() {
   const expressApp = express();
@@ -17,7 +19,7 @@ async function bootstrap() {
   };
 
   // CORS must be the very first middleware – handle preflight and set headers on all responses
-  expressApp.use((req, res, next) => {
+  expressApp.use((req: Request, res: Response, next: NextFunction) => {
     const origin = req.headers.origin as string | undefined;
     if (origin && allowOrigin(origin)) {
       res.setHeader('Access-Control-Allow-Origin', origin);
