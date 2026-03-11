@@ -36,6 +36,18 @@ model User {
   notifications      Notification[]
   orders             Order[]
   questions          Question[]
+  adminNotificationReads AdminNotificationRead[]
+}
+
+model AdminNotificationRead {
+  id             String   @id @default(cuid())
+  userId         String   @map("user_id")
+  notificationId String   @map("notification_id")
+  readAt         DateTime @default(now()) @map("read_at")
+  user           User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, notificationId])
+  @@map("admin_notification_read")
 }
 
 model Report {

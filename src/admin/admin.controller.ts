@@ -1,6 +1,7 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards, NotFoundException } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { AdminGuard } from '../auth/admin.guard';
+import { CurrentUser } from '../auth/current-user.decorator';
 import { UsersService } from '../users/users.service';
 import { PrismaService } from '../prisma/prisma.service';
 
@@ -248,11 +249,11 @@ export class AdminController {
   }
 
   @Get('notifications')
-  async getNotifications() {
+  async getNotifications(@CurrentUser() user: { id: string }) {
     const since = new Date();
     since.setDate(since.getDate() - 7);
 
-    const [newQuestions, recentOrders] = await Promise.all([
+    const [newQuestions, recentOrders, readRecords] = await Promise.all([
       this.prisma.question.findMany({
         where: { status: 'new' },
         orderBy: { createdAt: 'desc' },
@@ -265,7 +266,13 @@ export class AdminController {
         take: 30,
         include: { user: { select: { name: true } } },
       }),
+      this.prisma.adminNotificationRead.findMany({
+        where: { userId: user.id },
+        select: { notificationId: true },
+      }),
     ]);
+
+    const readIds = new Set(readRecords.map((r) => r.notificationId));
 
     const notifications: Array<{
       id: string;
@@ -278,31 +285,76 @@ export class AdminController {
     }> = [];
 
     newQuestions.forEach((q) => {
+      const id = `q-${q.id}`;
       notifications.push({
-        id: `q-${q.id}`,
+        id,
         type: 'question',
         title: 'Nueva pregunta',
         description: `${q.user.name} (${q.user.email})`,
         date: q.createdAt.toISOString(),
         link: '/admin/questions',
-        unread: true,
+        unread: !readIds.has(id),
       });
     });
 
     recentOrders.forEach((o) => {
+      const id = `o-${o.id}`;
       notifications.push({
-        id: `o-${o.id}`,
+        id,
         type: 'order',
         title: 'Nuevo pedido',
         description: `${o.type} — ${o.amount} — ${o.user.name}`,
         date: o.createdAt.toISOString(),
         link: '/admin/orders',
-        unread: true,
+        unread: !readIds.has(id),
       });
     });
 
     notifications.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
-    return { notifications: notifications.slice(0, 50) };
+    const slice = notifications.slice(0, 50);
+    return { notifications: slice };
+  }
+
+  @Patch('notifications/:id/read')
+  async markNotificationRead(@CurrentUser() user: { id: string }, @Param('id') id: string) {
+    await this.prisma.adminNotificationRead.upsert({
+      where: {
+        userId_notificationId: { userId: user.id, notificationId: id },
+      },
+      create: { userId: user.id, notificationId: id },
+      update: {},
+    });
+    return { ok: true };
+  }
+
+  @Post('notifications/read-all')
+  async markAllNotificationsRead(@CurrentUser() user: { id: string }) {
+    const since = new Date();
+    since.setDate(since.getDate() - 7);
+    const [newQuestions, recentOrders] = await Promise.all([
+      this.prisma.question.findMany({
+        where: { status: 'new' },
+        orderBy: { createdAt: 'desc' },
+        take: 30,
+        select: { id: true },
+      }),
+      this.prisma.order.findMany({
+        where: { createdAt: { gte: since } },
+        orderBy: { createdAt: 'desc' },
+        take: 30,
+        select: { id: true },
+      }),
+    ]);
+    const ids = [
+      ...newQuestions.map((q) => `q-${q.id}`),
+      ...recentOrders.map((o) => `o-${o.id}`),
+    ];
+    if (ids.length === 0) return { ok: true };
+    await this.prisma.adminNotificationRead.createMany({
+      data: ids.map((notificationId) => ({ userId: user.id, notificationId })),
+      skipDuplicates: true,
+    });
+    return { ok: true };
   }
 
   @Get('questions/:id')
