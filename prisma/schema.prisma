@@ -61,13 +61,14 @@ model Report {
 }
 
 model Message {
-  id        String   @id @default(cuid())
-  userId    String   @map("user_id")
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
-  type      String   @map("type")
-  content   String   @db.Text
-  monthLabel String? @map("month_label")
-  createdAt DateTime @default(now()) @map("created_at")
+  id          String   @id @default(cuid())
+  userId      String   @map("user_id")
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type        String   @map("type")
+  content     String   @db.Text
+  questionText String? @map("question_text") @db.Text
+  monthLabel  String?  @map("month_label")
+  createdAt   DateTime @default(now()) @map("created_at")
 }
 
 model Notification {

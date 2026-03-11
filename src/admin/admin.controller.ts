@@ -389,6 +389,30 @@ export class AdminController {
       },
       include: { user: { select: { id: true, name: true, email: true } } },
     });
+
+    if (text && question.userId) {
+      await Promise.all([
+        this.prisma.message.create({
+          data: {
+            userId: question.userId,
+            type: 'answer',
+            content: text,
+            questionText: question.question,
+            monthLabel: null,
+          },
+        }),
+        this.prisma.notification.create({
+          data: {
+            userId: question.userId,
+            title: 'Nueva respuesta a tu pregunta',
+            body: text.length > 120 ? text.slice(0, 120) + '…' : text,
+            category: 'question',
+            read: false,
+          },
+        }),
+      ]);
+    }
+
     return {
       id: question.id,
       user: question.user.name,
