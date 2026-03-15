@@ -11,7 +11,7 @@ export class PaymentsController {
   @Post('subscription/checkout')
   async createSubscriptionCheckout(
     @CurrentUser() user: { id: string },
-    @Body() body: { provider: 'stripe' | 'mercadopago'; plan: 'essentials' | 'portal' | 'depth'; billing: 'monthly' | 'annual' },
+    @Body() body: { provider: 'stripe' | 'mercadopago'; plan: 'essentials' | 'portal' | 'depth'; billing: 'monthly' | 'annual'; embedded?: boolean },
   ) {
     return this.paymentsService.createSubscriptionCheckout(user.id, body);
   }
@@ -30,6 +30,14 @@ export class PaymentsController {
     @Body() body: { sessionId: string },
   ) {
     return this.paymentsService.confirmStripeSession(user.id, body.sessionId?.trim());
+  }
+
+  @Post('confirm/stripe-intent')
+  async confirmStripePaymentIntent(
+    @CurrentUser() user: { id: string },
+    @Body() body: { paymentIntentId: string },
+  ) {
+    return this.paymentsService.confirmStripePaymentIntent(user.id, body.paymentIntentId?.trim());
   }
 
   @Post('confirm/mercadopago')

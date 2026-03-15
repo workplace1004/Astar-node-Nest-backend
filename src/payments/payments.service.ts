@@ -12,12 +12,17 @@ export interface CheckoutResult {
   provider: Provider;
   checkoutUrl: string;
   reference: string;
+  mode?: 'custom';
+  stripeClientSecret?: string;
+  stripePublishableKey?: string;
+  stripePaymentIntentId?: string;
 }
 
 interface SubscriptionCheckoutInput {
   provider: Provider;
   plan: Plan;
   billing: Billing;
+  embedded?: boolean;
 }
 
 interface ExtraCheckoutInput {
@@ -102,57 +107,34 @@ export class PaymentsService {
       if (!process.env.STRIPE_SECRET_KEY) throw new BadRequestException('Missing STRIPE_SECRET_KEY');
       const stripe = this.getStripeClient();
       const amount = config.usd[input.billing];
-      let session: Stripe.Checkout.Session;
-      try {
-        session = await stripe.checkout.sessions.create({
-          mode: 'subscription',
-          success_url: `${FRONTEND_BASE}/subscribe?provider=stripe&status=success&session_id={CHECKOUT_SESSION_ID}`,
-          cancel_url: `${FRONTEND_BASE}/subscribe?provider=stripe&status=cancelled`,
-          client_reference_id: userId,
-          customer_email: user.email,
-          locale: 'auto',
-          billing_address_collection: 'auto',
-          phone_number_collection: { enabled: true },
-          allow_promotion_codes: true,
-          payment_method_collection: 'always',
-          metadata: {
-            userId,
-            paymentKind: 'subscription',
-            plan: input.plan,
-            billing: input.billing,
-          },
-          subscription_data: {
-            metadata: {
-              userId,
-              paymentKind: 'subscription',
-              plan: input.plan,
-              billing: input.billing,
-            },
-          },
-          line_items: [
-            {
-              quantity: 1,
-              price_data: {
-                currency: 'usd',
-                unit_amount: Math.round(amount * 100),
-                recurring: { interval: input.billing === 'monthly' ? 'month' : 'year' },
-                product_data: {
-                  name: `${config.title} (${input.billing === 'monthly' ? 'Mensual' : 'Anual'})`,
-                },
-              },
-            },
-          ],
-        });
-      } catch (err) {
-        const message =
-          err instanceof Error && err.message
-            ? `Stripe checkout failed: ${err.message}`
-            : 'Stripe checkout failed';
-        throw new BadRequestException(message);
+      const publishableKey = process.env.STRIPE_PUBLISHABLE_KEY;
+      if (!publishableKey) throw new BadRequestException('Missing STRIPE_PUBLISHABLE_KEY');
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: Math.round(amount * 100),
+        currency: 'usd',
+        automatic_payment_methods: { enabled: true },
+        receipt_email: user.email,
+        metadata: {
+          userId,
+          paymentKind: 'subscription',
+          plan: input.plan,
+          billing: input.billing,
+        },
+      });
+
+      if (!paymentIntent.client_secret) {
+        throw new BadRequestException('Stripe payment intent client secret not available');
       }
 
-      if (!session.url) throw new BadRequestException('Stripe checkout URL not available');
-      return { provider: 'stripe', checkoutUrl: session.url, reference: session.id };
+      return {
+        provider: 'stripe',
+        checkoutUrl: '',
+        reference: paymentIntent.id,
+        mode: 'custom',
+        stripeClientSecret: paymentIntent.client_secret,
+        stripePublishableKey: publishableKey,
+        stripePaymentIntentId: paymentIntent.id ?? undefined,
+      };
     }
 
     if (!process.env.MERCADOPAGO_ACCESS_TOKEN) throw new BadRequestException('Missing MERCADOPAGO_ACCESS_TOKEN');
@@ -213,30 +195,31 @@ export class PaymentsService {
 
     if (input.provider === 'stripe') {
       const stripe = this.getStripeClient();
-      const session = await stripe.checkout.sessions.create({
-        mode: 'payment',
-        success_url: `${FRONTEND_BASE}/portal/purchase?provider=stripe&status=success&session_id={CHECKOUT_SESSION_ID}`,
-        cancel_url: `${FRONTEND_BASE}/portal/purchase?provider=stripe&status=cancelled`,
-        client_reference_id: userId,
+      const publishableKey = process.env.STRIPE_PUBLISHABLE_KEY;
+      if (!publishableKey) throw new BadRequestException('Missing STRIPE_PUBLISHABLE_KEY');
+      const paymentIntent = await stripe.paymentIntents.create({
+        amount: Math.round(extra.usd * 100) * quantity,
+        currency: 'usd',
+        automatic_payment_methods: { enabled: true },
         metadata: {
           userId,
           paymentKind: 'extra',
           extraType: input.extraType,
           quantity: String(quantity),
         },
-        line_items: [
-          {
-            quantity,
-            price_data: {
-              currency: 'usd',
-              unit_amount: Math.round(extra.usd * 100),
-              product_data: { name: extra.title },
-            },
-          },
-        ],
       });
-      if (!session.url) throw new BadRequestException('Stripe checkout URL not available');
-      return { provider: 'stripe', checkoutUrl: session.url, reference: session.id };
+      if (!paymentIntent.client_secret) {
+        throw new BadRequestException('Stripe payment intent client secret not available');
+      }
+      return {
+        provider: 'stripe',
+        checkoutUrl: '',
+        reference: paymentIntent.id,
+        mode: 'custom',
+        stripeClientSecret: paymentIntent.client_secret,
+        stripePublishableKey: publishableKey,
+        stripePaymentIntentId: paymentIntent.id,
+      };
     }
 
     const accessToken = this.getMercadoPagoToken();
@@ -343,6 +326,43 @@ export class PaymentsService {
       provider: 'stripe' as const,
       paymentKind,
       subscriptionStatus: paymentKind === 'subscription' ? 'active' : undefined,
+    };
+  }
+
+  async confirmStripePaymentIntent(userId: string, paymentIntentId: string) {
+    await this.requireClient(userId);
+    if (!paymentIntentId?.trim()) throw new BadRequestException('paymentIntentId is required');
+
+    const stripe = this.getStripeClient();
+    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+    const metadata = paymentIntent.metadata ?? {};
+    if (metadata.userId !== userId) {
+      throw new ForbiddenException('Payment intent does not belong to user');
+    }
+    if (paymentIntent.status !== 'succeeded') {
+      throw new BadRequestException('Stripe payment is not completed');
+    }
+
+    const paymentKind = (metadata.paymentKind as 'subscription' | 'extra' | undefined) ?? 'subscription';
+    const type =
+      paymentKind === 'subscription'
+        ? `subscription:${metadata.plan ?? 'portal'}:${metadata.billing ?? 'monthly'}`
+        : `extra:${metadata.extraType ?? 'extra_question'}:${metadata.quantity ?? '1'}`;
+    await this.createOrderIfMissing({
+      userId,
+      type,
+      amount: `${((paymentIntent.amount ?? 0) / 100).toFixed(2)} ${(paymentIntent.currency ?? 'USD').toUpperCase()}`,
+      method: `stripe_intent:${paymentIntent.id}`,
+    });
+    if (paymentKind === 'subscription') {
+      await this.usersService.updateSubscription(userId, 'active');
+    }
+
+    return {
+      ok: true,
+      provider: 'stripe' as const,
+      paymentKind: paymentKind as 'subscription' | 'extra',
+      subscriptionStatus: paymentKind === 'subscription' ? ('active' as const) : undefined,
     };
   }
 
