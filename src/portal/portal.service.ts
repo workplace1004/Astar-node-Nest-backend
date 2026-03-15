@@ -23,6 +23,7 @@ export class PortalService {
       birthDate: user.birthDate,
       birthPlace: user.birthPlace,
       birthTime: user.birthTime,
+      avatarUrl: user.avatarUrl ?? null,
       createdAt: user.createdAt.toISOString(),
     };
   }

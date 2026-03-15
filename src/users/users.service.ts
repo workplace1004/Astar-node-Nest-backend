@@ -7,7 +7,7 @@ import { UserResponse } from './user.interface';
 export class UsersService {
   constructor(private prisma: PrismaService) {}
 
-  private toResponse(user: { id: string; email: string; name: string; role: string; isActive: boolean; subscriptionStatus: string }): UserResponse {
+  private toResponse(user: { id: string; email: string; name: string; role: string; isActive: boolean; subscriptionStatus: string; avatarUrl?: string | null }): UserResponse {
     return {
       id: user.id,
       email: user.email,
@@ -15,6 +15,7 @@ export class UsersService {
       role: user.role as UserResponse['role'],
       isActive: user.isActive,
       subscriptionStatus: user.subscriptionStatus as UserResponse['subscriptionStatus'],
+      avatarUrl: user.avatarUrl ?? null,
     };
   }
 
@@ -67,7 +68,7 @@ export class UsersService {
     return bcrypt.compare(password, user.passwordHash);
   }
 
-  toPublic(user: { id: string; email: string; name: string; role: string; isActive: boolean; subscriptionStatus: string }): UserResponse {
+  toPublic(user: { id: string; email: string; name: string; role: string; isActive: boolean; subscriptionStatus: string; avatarUrl?: string | null }): UserResponse {
     return this.toResponse(user);
   }
 
@@ -158,12 +159,12 @@ export class UsersService {
 
   async updateProfile(
     userId: string,
-    data: { name?: string; email?: string },
+    data: { name?: string; email?: string; birthDate?: string; birthPlace?: string; birthTime?: string; avatarUrl?: string },
   ): Promise<UserResponse> {
     const existing = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!existing) throw new UnauthorizedException('User not found');
 
-    const updateData: { name?: string; email?: string } = {};
+    const updateData: { name?: string; email?: string; birthDate?: string | null; birthPlace?: string | null; birthTime?: string | null; avatarUrl?: string | null } = {};
     if (typeof data.name === 'string' && data.name.trim()) {
       updateData.name = data.name.trim();
     }
@@ -174,6 +175,22 @@ export class UsersService {
         if (taken) throw new BadRequestException('Este correo ya está en uso.');
         updateData.email = newEmail;
       }
+    }
+    if (typeof data.birthDate === 'string') {
+      const trimmed = data.birthDate.trim();
+      updateData.birthDate = trimmed.length > 0 ? trimmed : null;
+    }
+    if (typeof data.birthPlace === 'string') {
+      const trimmed = data.birthPlace.trim();
+      updateData.birthPlace = trimmed.length > 0 ? trimmed : null;
+    }
+    if (typeof data.birthTime === 'string') {
+      const trimmed = data.birthTime.trim();
+      updateData.birthTime = trimmed.length > 0 ? trimmed : null;
+    }
+    if (typeof data.avatarUrl === 'string') {
+      const trimmed = data.avatarUrl.trim();
+      updateData.avatarUrl = trimmed.length > 0 ? trimmed : null;
     }
     if (Object.keys(updateData).length === 0) return this.toResponse(existing);
 

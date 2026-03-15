@@ -29,6 +29,7 @@ model User {
   birthDate          String?            @map("birth_date")
   birthPlace         String?            @map("birth_place")
   birthTime          String?            @map("birth_time")
+  avatarUrl          String?            @map("avatar_url")
   createdAt          DateTime           @default(now()) @map("created_at")
   updatedAt          DateTime           @updatedAt @map("updated_at")
   reports            Report[]

@@ -51,7 +51,7 @@ export class AuthService {
 
   async updateProfile(
     userId: string,
-    data: { name?: string; email?: string },
+    data: { name?: string; email?: string; birthDate?: string; birthPlace?: string; birthTime?: string; avatarUrl?: string },
   ): Promise<UserResponse> {
     return this.usersService.updateProfile(userId, data);
   }

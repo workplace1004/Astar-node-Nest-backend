@@ -11,6 +11,7 @@ export interface User {
   birthDate?: string;
   birthPlace?: string;
   birthTime?: string;
+  avatarUrl?: string;
 }
 
 export interface UserResponse {
@@ -20,4 +21,5 @@ export interface UserResponse {
   role: UserRole;
   isActive: boolean;
   subscriptionStatus: SubscriptionStatus;
+  avatarUrl?: string | null;
 }
