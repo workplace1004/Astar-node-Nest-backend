@@ -111,13 +111,29 @@ function isHttpUrl(value: unknown): value is string {
   return typeof value === 'string' && /^https?:\/\//i.test(value.trim());
 }
 
+function isDataImageUri(value: unknown): value is string {
+  return typeof value === 'string' && /^data:image\//i.test(value.trim());
+}
+
+function looksLikeSvgMarkup(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const normalized = value.trim().toLowerCase();
+  return normalized.includes('<svg');
+}
+
+function looksLikeSvgBase64(value: unknown): value is string {
+  if (typeof value !== 'string') return false;
+  const normalized = value.trim();
+  return normalized.startsWith('PHN2Zy') || normalized.startsWith('PD94bWwg');
+}
+
 function findChartUrlInObject(input: unknown): string | null {
   if (!input || typeof input !== 'object') return null;
   const obj = input as Record<string, unknown>;
-  const directKeys = ['chart_url', 'chartUrl', 'url', 'image_url', 'imageUrl', 'chart'];
+  const directKeys = ['chart_url', 'chartUrl', 'url', 'image_url', 'imageUrl', 'chart', 'chart_image', 'chartImage'];
   for (const key of directKeys) {
     const value = obj[key];
-    if (isHttpUrl(value)) return value.trim();
+    if (isHttpUrl(value) || isDataImageUri(value)) return value.trim();
   }
   const nestedKeys = ['data', 'result', 'response'];
   for (const key of nestedKeys) {
@@ -133,12 +149,14 @@ function findChartUrlInObject(input: unknown): string | null {
 function findSvgDataUriInObject(input: unknown): string | null {
   if (!input || typeof input !== 'object') return null;
   const obj = input as Record<string, unknown>;
-  const svgKeys = ['svg', 'svg_data', 'svgData', 'image_svg'];
+  const svgKeys = ['svg', 'svg_data', 'svgData', 'image_svg', 'base64', 'chart_data', 'chartData'];
   for (const key of svgKeys) {
     const value = obj[key];
-    if (typeof value === 'string' && value.trim().startsWith('<svg')) {
+    if (looksLikeSvgMarkup(value)) {
       return `data:image/svg+xml;utf8,${encodeURIComponent(value)}`;
     }
+    if (isDataImageUri(value)) return value.trim();
+    if (looksLikeSvgBase64(value)) return `data:image/svg+xml;base64,${value.trim()}`;
   }
   const nestedKeys = ['data', 'result', 'response'];
   for (const key of nestedKeys) {
@@ -255,7 +273,11 @@ export class BirthChartService {
       );
     }
     const chartUrl =
-      (typeof wheelBody === 'string' && isHttpUrl(wheelBody) ? wheelBody.trim() : null) ??
+      (typeof wheelBody === 'string' && (isHttpUrl(wheelBody) || isDataImageUri(wheelBody)) ? wheelBody.trim() : null) ??
+      (typeof wheelBody === 'string' && looksLikeSvgMarkup(wheelBody)
+        ? `data:image/svg+xml;utf8,${encodeURIComponent(wheelBody)}`
+        : null) ??
+      (typeof wheelBody === 'string' && looksLikeSvgBase64(wheelBody) ? `data:image/svg+xml;base64,${wheelBody.trim()}` : null) ??
       findChartUrlInObject(wheelBody) ??
       findSvgDataUriInObject(wheelBody);
     if (typeof chartUrl !== 'string' || chartUrl.trim().length === 0) {
