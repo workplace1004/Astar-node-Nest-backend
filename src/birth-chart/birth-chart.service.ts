@@ -194,6 +194,98 @@ function extractProviderErrorMessage(payload: unknown): string | null {
   return null;
 }
 
+function normalizeKey(value: string): string {
+  return value
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase();
+}
+
+function toSpanishSign(signValue: unknown): string | null {
+  if (typeof signValue !== 'string') return null;
+  const key = normalizeKey(signValue);
+  const map: Record<string, string> = {
+    aries: 'Aries',
+    tauro: 'Tauro',
+    taurus: 'Tauro',
+    geminis: 'Géminis',
+    gemini: 'Géminis',
+    cancer: 'Cáncer',
+    leo: 'Leo',
+    virgo: 'Virgo',
+    libra: 'Libra',
+    escorpio: 'Escorpio',
+    scorpio: 'Escorpio',
+    sagitario: 'Sagitario',
+    sagittarius: 'Sagitario',
+    capricornio: 'Capricornio',
+    capricorn: 'Capricornio',
+    acuario: 'Acuario',
+    aquarius: 'Acuario',
+    piscis: 'Piscis',
+    pisces: 'Piscis',
+  };
+  return map[key] ?? null;
+}
+
+function parseSignFromNode(value: unknown): string | null {
+  if (typeof value === 'string') return toSpanishSign(value);
+  if (!value || typeof value !== 'object') return null;
+  const obj = value as Record<string, unknown>;
+  return (
+    toSpanishSign(obj.sign) ??
+    toSpanishSign(obj.sign_name) ??
+    toSpanishSign(obj.zodiac_sign) ??
+    toSpanishSign(obj.rashi)
+  );
+}
+
+function findPlanetSignInPayload(input: unknown, planetAliases: string[]): string | null {
+  const aliases = planetAliases.map((a) => normalizeKey(a));
+  if (!input) return null;
+  if (Array.isArray(input)) {
+    for (const item of input) {
+      const found = findPlanetSignInPayload(item, planetAliases);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof input !== 'object') return null;
+  const obj = input as Record<string, unknown>;
+
+  const nameCandidates = [obj.name, obj.planet, obj.object, obj.id]
+    .filter((v): v is string => typeof v === 'string')
+    .map((v) => normalizeKey(v));
+  if (nameCandidates.some((n) => aliases.includes(n))) {
+    const signFromItem = parseSignFromNode(obj);
+    if (signFromItem) return signFromItem;
+  }
+
+  for (const alias of aliases) {
+    const direct = obj[alias] ?? obj[alias.toUpperCase()] ?? obj[alias.toLowerCase()];
+    const directSign = parseSignFromNode(direct);
+    if (directSign) return directSign;
+  }
+
+  const nestedKeys = ['data', 'result', 'response', 'planets', 'items'];
+  for (const key of nestedKeys) {
+    const nested = obj[key];
+    if (nested && typeof nested === 'object') {
+      const found = findPlanetSignInPayload(nested, planetAliases);
+      if (found) return found;
+    }
+  }
+
+  for (const value of Object.values(obj)) {
+    if (value && typeof value === 'object') {
+      const found = findPlanetSignInPayload(value, planetAliases);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 function findChartUrlInObject(input: unknown): string | null {
   if (!input) return null;
   if (Array.isArray(input)) {
@@ -282,38 +374,11 @@ export class BirthChartService {
     return 0;
   }
 
-  /** Approximate moon sign from date and time (simplified lunar cycle ~29.5 days). */
-  getMoonSign(year: number, month: number, day: number, hour: number, minute: number): number {
-    const date = new Date(year, month - 1, day, hour, minute, 0);
-    const epoch = new Date(2000, 0, 6, 18, 14, 0); // known new moon
-    const days = (date.getTime() - epoch.getTime()) / (1000 * 60 * 60 * 24);
-    const lunarLongitude = (days * 13.176) % 360;
-    const signIndex = Math.floor((lunarLongitude + 360) % 360 / 30) % 12;
-    return signIndex;
-  }
-
-  /** Approximate ascendant sign from local time (≈2h per sign). */
-  getAscendantSign(hour: number, minute: number): number {
-    const totalHours = hour + minute / 60;
-    const signIndex = Math.floor((totalHours / 2) % 12);
-    return signIndex < 0 ? signIndex + 12 : signIndex;
-  }
-
   async getPreview(dto: BirthChartPreviewDto): Promise<BirthChartPreviewResult> {
-    const [y, m, d] = dto.birthDate.split('-').map(Number);
-    const [h, min] = dto.birthTime.split(':').map(Number);
     const email = dto.email?.trim().toLowerCase();
     if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       throw new BadRequestException('Email inválido.');
     }
-
-    const sunIndex = this.getSunSign(y, m, d);
-    const moonIndex = this.getMoonSign(y, m, d, h ?? 12, min ?? 0);
-    const ascIndex = this.getAscendantSign(h ?? 12, min ?? 0);
-
-    const sunSign = SIGNS_ES[sunIndex];
-    const moonSign = SIGNS_ES[moonIndex];
-    const ascSign = SIGNS_ES[ascIndex];
 
     const astrologyApiUserId = process.env.ASTROLOGY_API_USER_ID?.trim();
     const astrologyApiKey = process.env.ASTROLOGY_API_KEY?.trim();
@@ -338,23 +403,34 @@ export class BirthChartService {
     const [year, month, day] = dto.birthDate.split('-').map(Number);
     const [hour, minute] = dto.birthTime.split(':').map(Number);
     const auth = Buffer.from(`${astrologyApiUserId}:${astrologyApiKey}`).toString('base64');
-    const wheelRes = await fetch('https://json.astrologyapi.com/v1/natal_wheel_chart', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Basic ${auth}`,
-      },
-      body: JSON.stringify({
-        day,
-        month,
-        year,
-        hour: Number.isFinite(hour) ? hour : 12,
-        min: Number.isFinite(minute) ? minute : 0,
-        lat: dto.lat,
-        lon: dto.lon,
-        tzone: resolvedTzone,
+    const providerPayload = {
+      day,
+      month,
+      year,
+      hour: Number.isFinite(hour) ? hour : 12,
+      min: Number.isFinite(minute) ? minute : 0,
+      lat: dto.lat,
+      lon: dto.lon,
+      tzone: resolvedTzone,
+    };
+    const [wheelRes, planetsRes] = await Promise.all([
+      fetch('https://json.astrologyapi.com/v1/natal_wheel_chart', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Basic ${auth}`,
+        },
+        body: JSON.stringify(providerPayload),
       }),
-    });
+      fetch('https://json.astrologyapi.com/v1/planets/tropical', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Basic ${auth}`,
+        },
+        body: JSON.stringify(providerPayload),
+      }),
+    ]);
     const wheelRaw = await wheelRes.text();
     let wheelBody: unknown = {};
     if (wheelRaw.trim().length > 0) {
@@ -384,6 +460,40 @@ export class BirthChartService {
       throw new BadRequestException(
         `La API no devolvió el dibujo de la carta astral (chart_url/url). Verifica formato de respuesta del proveedor. Formato recibido: ${describePayloadShape(wheelBody, wheelRaw)}`,
       );
+    }
+
+    const planetsRaw = await planetsRes.text();
+    let planetsBody: unknown = {};
+    if (planetsRaw.trim().length > 0) {
+      try {
+        planetsBody = JSON.parse(planetsRaw) as unknown;
+      } catch {
+        planetsBody = planetsRaw;
+      }
+    }
+    if (!planetsRes.ok) {
+      throw new BadRequestException(
+        `No se pudieron obtener posiciones planetarias del proveedor: ${extractProviderErrorMessage(planetsBody) ?? 'error desconocido'}`,
+      );
+    }
+    const planetsError = extractProviderErrorMessage(planetsBody);
+    if (planetsError) {
+      throw new BadRequestException(`Proveedor astrológico devolvió error en planets/tropical: ${planetsError}`);
+    }
+
+    const sunSign = findPlanetSignInPayload(planetsBody, ['sun', 'sol']);
+    const moonSign = findPlanetSignInPayload(planetsBody, ['moon', 'luna']);
+    const ascSign = findPlanetSignInPayload(planetsBody, ['ascendant', 'asc', 'lagna']);
+    if (!sunSign || !moonSign || !ascSign) {
+      throw new BadRequestException(
+        `No se pudieron resolver Sol/Luna/Ascendente desde planets/tropical. Formato recibido: ${describePayloadShape(planetsBody, planetsRaw)}`,
+      );
+    }
+    const sunIndex = SIGNS_ES.indexOf(sunSign);
+    const moonIndex = SIGNS_ES.indexOf(moonSign);
+    const ascIndex = SIGNS_ES.indexOf(ascSign);
+    if (sunIndex < 0 || moonIndex < 0 || ascIndex < 0) {
+      throw new BadRequestException('El proveedor devolvió signos no reconocidos para Sol/Luna/Ascendente.');
     }
 
     const result: BirthChartPreviewResult = {
