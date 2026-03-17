@@ -1,8 +1,10 @@
 import { Module } from '@nestjs/common';
 import { BirthChartController } from './birth-chart.controller';
 import { BirthChartService } from './birth-chart.service';
+import { PrismaModule } from '../prisma/prisma.module';
 
 @Module({
+  imports: [PrismaModule],
   controllers: [BirthChartController],
   providers: [BirthChartService],
 })

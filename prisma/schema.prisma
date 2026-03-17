@@ -132,3 +132,17 @@ model Question {
   status    QuestionStatus @default(new)
   createdAt DateTime       @default(now()) @map("created_at")
 }
+
+model Preview {
+  id            String   @id @default(cuid())
+  email         String
+  birthDate     String   @map("birth_date")
+  birthTime     String   @map("birth_time")
+  birthPlace    String   @map("birth_place")
+  sunSign       String   @map("sun_sign")
+  moonSign      String   @map("moon_sign")
+  ascendantSign String   @map("ascendant_sign")
+  createdAt     DateTime @default(now()) @map("created_at")
+
+  @@map("preview")
+}

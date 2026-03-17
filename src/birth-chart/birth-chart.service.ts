@@ -1,4 +1,5 @@
-import { Injectable } from '@nestjs/common';
+import { BadRequestException, Injectable } from '@nestjs/common';
+import { PrismaService } from '../prisma/prisma.service';
 
 const SIGNS_ES = [
   'Aries', 'Tauro', 'Géminis', 'Cáncer', 'Leo', 'Virgo',
@@ -65,6 +66,7 @@ export interface BirthChartPreviewDto {
   birthDate: string;  // YYYY-MM-DD
   birthTime: string;  // HH:mm
   birthPlace: string;
+  email: string;
 }
 
 export interface SignResult {
@@ -81,6 +83,8 @@ export interface BirthChartPreviewResult {
 
 @Injectable()
 export class BirthChartService {
+  constructor(private readonly prisma: PrismaService) {}
+
   getSunSign(_year: number, month: number, day: number): number {
     let doy = getDayOfYear(month, day);
     if (month <= 2) doy += 365;
@@ -107,9 +111,13 @@ export class BirthChartService {
     return signIndex < 0 ? signIndex + 12 : signIndex;
   }
 
-  getPreview(dto: BirthChartPreviewDto): BirthChartPreviewResult {
+  async getPreview(dto: BirthChartPreviewDto): Promise<BirthChartPreviewResult> {
     const [y, m, d] = dto.birthDate.split('-').map(Number);
     const [h, min] = dto.birthTime.split(':').map(Number);
+    const email = dto.email?.trim().toLowerCase();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      throw new BadRequestException('Email inválido.');
+    }
 
     const sunIndex = this.getSunSign(y, m, d);
     const moonIndex = this.getMoonSign(y, m, d, h ?? 12, min ?? 0);
@@ -119,7 +127,7 @@ export class BirthChartService {
     const moonSign = SIGNS_ES[moonIndex];
     const ascSign = SIGNS_ES[ascIndex];
 
-    return {
+    const result = {
       sun: {
         sign: sunSign,
         symbol: SYMBOLS[sunIndex],
@@ -136,5 +144,19 @@ export class BirthChartService {
         description: ASCENDENTE_DESCRIPTIONS[ascSign] ?? '',
       },
     };
+
+    await this.prisma.preview.create({
+      data: {
+        email,
+        birthDate: dto.birthDate,
+        birthTime: dto.birthTime,
+        birthPlace: dto.birthPlace?.trim() ?? '',
+        sunSign,
+        moonSign,
+        ascendantSign: ascSign,
+      },
+    });
+
+    return result;
   }
 }
