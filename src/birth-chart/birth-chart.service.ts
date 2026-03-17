@@ -67,9 +67,10 @@ export interface BirthChartPreviewDto {
   birthTime: string;  // HH:mm
   birthPlace: string;
   email: string;
-  lat?: number;
-  lon?: number;
+  lat: number;
+  lon: number;
   tzone?: number;
+  timezone?: string;
 }
 
 export interface SignResult {
@@ -82,7 +83,28 @@ export interface BirthChartPreviewResult {
   sun: SignResult;
   moon: SignResult;
   ascendant: SignResult;
-  chartUrl?: string | null;
+  chartUrl: string;
+}
+
+function computeTimezoneOffsetHours(dateIso: string, time24: string, timezone: string): number | null {
+  const [y, m, d] = dateIso.split('-').map(Number);
+  const [hh, mm] = time24.split(':').map(Number);
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) return null;
+  const date = new Date(Date.UTC(y, (m ?? 1) - 1, d ?? 1, Number.isFinite(hh) ? hh : 12, Number.isFinite(mm) ? mm : 0));
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: timezone,
+    timeZoneName: 'shortOffset',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date);
+  const offsetToken = parts.find((p) => p.type === 'timeZoneName')?.value ?? '';
+  const match = offsetToken.match(/(?:GMT|UTC)([+-])(\d{1,2})(?::?(\d{2}))?/i);
+  if (!match) return null;
+  const sign = match[1] === '-' ? -1 : 1;
+  const hours = parseInt(match[2] ?? '0', 10);
+  const minutes = parseInt(match[3] ?? '0', 10);
+  return sign * (hours + minutes / 60);
 }
 
 @Injectable()
@@ -131,6 +153,60 @@ export class BirthChartService {
     const moonSign = SIGNS_ES[moonIndex];
     const ascSign = SIGNS_ES[ascIndex];
 
+    const astrologyApiUserId = process.env.ASTROLOGY_API_USER_ID?.trim();
+    const astrologyApiKey = process.env.ASTROLOGY_API_KEY?.trim();
+    if (!astrologyApiUserId || !astrologyApiKey) {
+      throw new BadRequestException('La API astrológica no está configurada en backend.');
+    }
+    if (typeof dto.lat !== 'number' || !Number.isFinite(dto.lat) || typeof dto.lon !== 'number' || !Number.isFinite(dto.lon)) {
+      throw new BadRequestException('Latitud y longitud son obligatorias para generar la carta astral.');
+    }
+
+    const timezoneFromInput = dto.timezone?.trim();
+    const resolvedTzone =
+      typeof dto.tzone === 'number' && Number.isFinite(dto.tzone)
+        ? dto.tzone
+        : timezoneFromInput
+          ? computeTimezoneOffsetHours(dto.birthDate, dto.birthTime, timezoneFromInput)
+          : null;
+    if (resolvedTzone == null) {
+      throw new BadRequestException('No se pudo resolver la zona horaria para la carta astral.');
+    }
+
+    const [year, month, day] = dto.birthDate.split('-').map(Number);
+    const [hour, minute] = dto.birthTime.split(':').map(Number);
+    const auth = Buffer.from(`${astrologyApiUserId}:${astrologyApiKey}`).toString('base64');
+    const wheelRes = await fetch('https://json.astrologyapi.com/v1/natal_wheel_chart', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Basic ${auth}`,
+        'Accept-Language': 'es',
+      },
+      body: JSON.stringify({
+        day,
+        month,
+        year,
+        hour: Number.isFinite(hour) ? hour : 12,
+        min: Number.isFinite(minute) ? minute : 0,
+        lat: dto.lat,
+        lon: dto.lon,
+        tzone: resolvedTzone,
+      }),
+    });
+    const wheelBody = await wheelRes.json().catch(() => ({}));
+    if (!wheelRes.ok) {
+      throw new BadRequestException(
+        (wheelBody as { msg?: string; message?: string }).msg ??
+          (wheelBody as { msg?: string; message?: string }).message ??
+          'No se pudo generar el dibujo de la carta astral.',
+      );
+    }
+    const chartUrl = (wheelBody as { chart_url?: string }).chart_url;
+    if (typeof chartUrl !== 'string' || chartUrl.trim().length === 0) {
+      throw new BadRequestException('La API no devolvió el dibujo de la carta astral.');
+    }
+
     const result: BirthChartPreviewResult = {
       sun: {
         sign: sunSign,
@@ -147,55 +223,8 @@ export class BirthChartService {
         symbol: SYMBOLS[ascIndex],
         description: ASCENDENTE_DESCRIPTIONS[ascSign] ?? '',
       },
-      chartUrl: null,
+      chartUrl,
     };
-
-    const astrologyApiUserId = process.env.ASTROLOGY_API_USER_ID?.trim();
-    const astrologyApiKey = process.env.ASTROLOGY_API_KEY?.trim();
-    if (
-      astrologyApiUserId &&
-      astrologyApiKey &&
-      typeof dto.lat === 'number' &&
-      Number.isFinite(dto.lat) &&
-      typeof dto.lon === 'number' &&
-      Number.isFinite(dto.lon) &&
-      typeof dto.tzone === 'number' &&
-      Number.isFinite(dto.tzone)
-    ) {
-      const [year, month, day] = dto.birthDate.split('-').map(Number);
-      const [hour, minute] = dto.birthTime.split(':').map(Number);
-      const auth = Buffer.from(`${astrologyApiUserId}:${astrologyApiKey}`).toString('base64');
-      const wheelRes = await fetch('https://json.astrologyapi.com/v1/natal_wheel_chart', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Basic ${auth}`,
-          'Accept-Language': 'es',
-        },
-        body: JSON.stringify({
-          day,
-          month,
-          year,
-          hour: Number.isFinite(hour) ? hour : 12,
-          min: Number.isFinite(minute) ? minute : 0,
-          lat: dto.lat,
-          lon: dto.lon,
-          tzone: dto.tzone,
-        }),
-      });
-      const wheelBody = await wheelRes.json().catch(() => ({}));
-      if (!wheelRes.ok) {
-        throw new BadRequestException(
-          (wheelBody as { msg?: string; message?: string }).msg ??
-            (wheelBody as { msg?: string; message?: string }).message ??
-            'No se pudo generar el dibujo de la carta astral.',
-        );
-      }
-      const chartUrl = (wheelBody as { chart_url?: string }).chart_url;
-      if (typeof chartUrl === 'string' && chartUrl.length > 0) {
-        result.chartUrl = chartUrl;
-      }
-    }
 
     await this.prisma.preview.create({
       data: {
@@ -206,7 +235,7 @@ export class BirthChartService {
         sunSign,
         moonSign,
         ascendantSign: ascSign,
-        chartUrl: result.chartUrl,
+        chartUrl,
       },
     });
 
