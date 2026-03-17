@@ -231,6 +231,42 @@ export class AdminController {
     return { deleted: true };
   }
 
+  @Get('birth-chart-interpretations')
+  async listBirthChartInterpretations() {
+    const rows = await this.prisma.birthChartInterpretation.findMany({
+      orderBy: [{ type: 'asc' }, { sign: 'asc' }],
+    });
+    return rows.map((row) => ({
+      id: row.id,
+      type: row.type,
+      sign: row.sign,
+      description: row.description,
+      updatedAt: row.updatedAt.toISOString(),
+    }));
+  }
+
+  @Patch('birth-chart-interpretations/:id')
+  async updateBirthChartInterpretation(
+    @Param('id') id: string,
+    @Body() body: { description?: string },
+  ) {
+    const description = typeof body?.description === 'string' ? body.description.trim() : '';
+    if (!description) throw new NotFoundException('description is required');
+    const existing = await this.prisma.birthChartInterpretation.findUnique({ where: { id } });
+    if (!existing) throw new NotFoundException('Interpretation not found');
+    const updated = await this.prisma.birthChartInterpretation.update({
+      where: { id },
+      data: { description },
+    });
+    return {
+      id: updated.id,
+      type: updated.type,
+      sign: updated.sign,
+      description: updated.description,
+      updatedAt: updated.updatedAt.toISOString(),
+    };
+  }
+
   @Get('questions')
   async listQuestions() {
     const questions = await this.prisma.question.findMany({

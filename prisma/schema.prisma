@@ -123,6 +123,12 @@ enum QuestionStatus {
   answered
 }
 
+enum BirthChartInterpretationType {
+  sun
+  moon
+  ascendant
+}
+
 model Question {
   id        String         @id @default(cuid())
   userId    String         @map("user_id")
@@ -146,4 +152,16 @@ model Preview {
   createdAt     DateTime @default(now()) @map("created_at")
 
   @@map("preview")
+}
+
+model BirthChartInterpretation {
+  id          String                      @id @default(cuid())
+  type        BirthChartInterpretationType
+  sign        String
+  description String                      @db.Text
+  createdAt   DateTime                    @default(now()) @map("created_at")
+  updatedAt   DateTime                    @updatedAt @map("updated_at")
+
+  @@unique([type, sign])
+  @@map("birth_chart_interpretation")
 }

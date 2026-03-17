@@ -395,6 +395,44 @@ function findSvgDataUriInObject(input: unknown): string | null {
 export class BirthChartService {
   constructor(private readonly prisma: PrismaService) {}
 
+  private async getInterpretationMaps(): Promise<{
+    sun: Record<string, string>;
+    moon: Record<string, string>;
+    ascendant: Record<string, string>;
+  }> {
+    const fallback = {
+      sun: SOL_DESCRIPTIONS,
+      moon: LUNA_DESCRIPTIONS,
+      ascendant: ASCENDENTE_DESCRIPTIONS,
+    };
+    try {
+      const rows = await this.prisma.birthChartInterpretation.findMany();
+      if (!rows.length) return fallback;
+      const fromDb = {
+        sun: { ...SOL_DESCRIPTIONS },
+        moon: { ...LUNA_DESCRIPTIONS },
+        ascendant: { ...ASCENDENTE_DESCRIPTIONS },
+      };
+      for (const row of rows) {
+        if (row.type === 'sun') {
+          fromDb.sun[row.sign] = row.description;
+          continue;
+        }
+        if (row.type === 'moon') {
+          fromDb.moon[row.sign] = row.description;
+          continue;
+        }
+        if (row.type === 'ascendant') {
+          fromDb.ascendant[row.sign] = row.description;
+        }
+      }
+      return fromDb;
+    } catch {
+      // Keep endpoint working while migration/seed is still pending in a given environment.
+      return fallback;
+    }
+  }
+
   getSunSign(_year: number, month: number, day: number): number {
     let doy = getDayOfYear(month, day);
     if (month <= 2) doy += 365;
@@ -528,22 +566,23 @@ export class BirthChartService {
     if (sunIndex < 0 || moonIndex < 0 || ascIndex < 0) {
       throw new BadRequestException('El proveedor devolvió signos no reconocidos para Sol/Luna/Ascendente.');
     }
+    const interpretationMaps = await this.getInterpretationMaps();
 
     const result: BirthChartPreviewResult = {
       sun: {
         sign: sunSign,
         symbol: SYMBOLS[sunIndex],
-        description: SOL_DESCRIPTIONS[sunSign] ?? '',
+        description: interpretationMaps.sun[sunSign] ?? '',
       },
       moon: {
         sign: moonSign,
         symbol: SYMBOLS[moonIndex],
-        description: LUNA_DESCRIPTIONS[moonSign] ?? '',
+        description: interpretationMaps.moon[moonSign] ?? '',
       },
       ascendant: {
         sign: ascSign,
         symbol: SYMBOLS[ascIndex],
-        description: ASCENDENTE_DESCRIPTIONS[ascSign] ?? '',
+        description: interpretationMaps.ascendant[ascSign] ?? '',
       },
       chartUrl,
       ...(process.env.NODE_ENV !== 'production'
