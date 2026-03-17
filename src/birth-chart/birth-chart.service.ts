@@ -67,6 +67,9 @@ export interface BirthChartPreviewDto {
   birthTime: string;  // HH:mm
   birthPlace: string;
   email: string;
+  lat?: number;
+  lon?: number;
+  tzone?: number;
 }
 
 export interface SignResult {
@@ -79,6 +82,7 @@ export interface BirthChartPreviewResult {
   sun: SignResult;
   moon: SignResult;
   ascendant: SignResult;
+  chartUrl?: string | null;
 }
 
 @Injectable()
@@ -127,7 +131,7 @@ export class BirthChartService {
     const moonSign = SIGNS_ES[moonIndex];
     const ascSign = SIGNS_ES[ascIndex];
 
-    const result = {
+    const result: BirthChartPreviewResult = {
       sun: {
         sign: sunSign,
         symbol: SYMBOLS[sunIndex],
@@ -143,7 +147,55 @@ export class BirthChartService {
         symbol: SYMBOLS[ascIndex],
         description: ASCENDENTE_DESCRIPTIONS[ascSign] ?? '',
       },
+      chartUrl: null,
     };
+
+    const astrologyApiUserId = process.env.ASTROLOGY_API_USER_ID?.trim();
+    const astrologyApiKey = process.env.ASTROLOGY_API_KEY?.trim();
+    if (
+      astrologyApiUserId &&
+      astrologyApiKey &&
+      typeof dto.lat === 'number' &&
+      Number.isFinite(dto.lat) &&
+      typeof dto.lon === 'number' &&
+      Number.isFinite(dto.lon) &&
+      typeof dto.tzone === 'number' &&
+      Number.isFinite(dto.tzone)
+    ) {
+      const [year, month, day] = dto.birthDate.split('-').map(Number);
+      const [hour, minute] = dto.birthTime.split(':').map(Number);
+      const auth = Buffer.from(`${astrologyApiUserId}:${astrologyApiKey}`).toString('base64');
+      const wheelRes = await fetch('https://json.astrologyapi.com/v1/natal_wheel_chart', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Basic ${auth}`,
+          'Accept-Language': 'es',
+        },
+        body: JSON.stringify({
+          day,
+          month,
+          year,
+          hour: Number.isFinite(hour) ? hour : 12,
+          min: Number.isFinite(minute) ? minute : 0,
+          lat: dto.lat,
+          lon: dto.lon,
+          tzone: dto.tzone,
+        }),
+      });
+      const wheelBody = await wheelRes.json().catch(() => ({}));
+      if (!wheelRes.ok) {
+        throw new BadRequestException(
+          (wheelBody as { msg?: string; message?: string }).msg ??
+            (wheelBody as { msg?: string; message?: string }).message ??
+            'No se pudo generar el dibujo de la carta astral.',
+        );
+      }
+      const chartUrl = (wheelBody as { chart_url?: string }).chart_url;
+      if (typeof chartUrl === 'string' && chartUrl.length > 0) {
+        result.chartUrl = chartUrl;
+      }
+    }
 
     await this.prisma.preview.create({
       data: {
@@ -154,6 +206,7 @@ export class BirthChartService {
         sunSign,
         moonSign,
         ascendantSign: ascSign,
+        chartUrl: result.chartUrl,
       },
     });
 

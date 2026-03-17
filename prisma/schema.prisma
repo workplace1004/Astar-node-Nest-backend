@@ -142,6 +142,7 @@ model Preview {
   sunSign       String   @map("sun_sign")
   moonSign      String   @map("moon_sign")
   ascendantSign String   @map("ascendant_sign")
+  chartUrl      String?  @map("chart_url")
   createdAt     DateTime @default(now()) @map("created_at")
 
   @@map("preview")
