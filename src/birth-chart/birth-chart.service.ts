@@ -84,6 +84,13 @@ export interface BirthChartPreviewResult {
   moon: SignResult;
   ascendant: SignResult;
   chartUrl: string;
+  debug?: {
+    provider: {
+      sun: { sign: string; degree: number | null };
+      moon: { sign: string; degree: number | null };
+      ascendant: { sign: string; degree: number | null };
+    };
+  };
 }
 
 function computeTimezoneOffsetHours(dateIso: string, time24: string, timezone: string): number | null {
@@ -241,29 +248,46 @@ function parseSignFromNode(value: unknown): string | null {
   );
 }
 
-function findPlanetSignInPayload(input: unknown, planetAliases: string[]): string | null {
+function parseDegreeFromNode(value: unknown): number | null {
+  if (!value || typeof value !== 'object') return null;
+  const obj = value as Record<string, unknown>;
+  const candidates = [obj.normDegree, obj.fullDegree, obj.degree, obj.norm_degree, obj.full_degree];
+  for (const item of candidates) {
+    if (typeof item === 'number' && Number.isFinite(item)) return item;
+    if (typeof item === 'string') {
+      const parsed = Number(item);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  return null;
+}
+
+function findPlanetDataInPayload(input: unknown, planetAliases: string[]): { sign: string; degree: number | null } | null {
   const aliases = new Set(planetAliases.map((a) => normalizeKey(a)));
   const visited = new Set<unknown>();
 
-  const tryObject = (obj: Record<string, unknown>): string | null => {
+  const tryObject = (obj: Record<string, unknown>): { sign: string; degree: number | null } | null => {
     const nameCandidates = [obj.name, obj.planet, obj.object, obj.id]
       .filter((v): v is string => typeof v === 'string')
       .map((v) => normalizeKey(v));
     if (nameCandidates.some((n) => aliases.has(n))) {
-      return parseSignFromNode(obj);
+      const sign = parseSignFromNode(obj);
+      if (!sign) return null;
+      return { sign, degree: parseDegreeFromNode(obj) };
     }
 
     // Fallback for keyed maps like { sun: { sign: "Sagittarius" } }
     for (const alias of aliases) {
       if (alias in obj) {
-        const sign = parseSignFromNode(obj[alias]);
-        if (sign) return sign;
+        const node = obj[alias];
+        const sign = parseSignFromNode(node);
+        if (sign) return { sign, degree: parseDegreeFromNode(node) };
       }
     }
     return null;
   };
 
-  const scan = (node: unknown): string | null => {
+  const scan = (node: unknown): { sign: string; degree: number | null } | null => {
     if (!node || typeof node !== 'object') return null;
     if (visited.has(node)) return null;
     visited.add(node);
@@ -487,14 +511,17 @@ export class BirthChartService {
       throw new BadRequestException(`Proveedor astrológico devolvió error en planets/tropical: ${planetsError}`);
     }
 
-    const sunSign = findPlanetSignInPayload(planetsBody, ['sun', 'sol']);
-    const moonSign = findPlanetSignInPayload(planetsBody, ['moon', 'luna']);
-    const ascSign = findPlanetSignInPayload(planetsBody, ['ascendant', 'asc', 'lagna']);
-    if (!sunSign || !moonSign || !ascSign) {
+    const sunData = findPlanetDataInPayload(planetsBody, ['sun', 'sol']);
+    const moonData = findPlanetDataInPayload(planetsBody, ['moon', 'luna']);
+    const ascData = findPlanetDataInPayload(planetsBody, ['ascendant', 'asc', 'lagna']);
+    if (!sunData || !moonData || !ascData) {
       throw new BadRequestException(
         `No se pudieron resolver Sol/Luna/Ascendente desde planets/tropical. Formato recibido: ${describePayloadShape(planetsBody, planetsRaw)}`,
       );
     }
+    const sunSign = sunData.sign;
+    const moonSign = moonData.sign;
+    const ascSign = ascData.sign;
     const sunIndex = SIGNS_ES.indexOf(sunSign);
     const moonIndex = SIGNS_ES.indexOf(moonSign);
     const ascIndex = SIGNS_ES.indexOf(ascSign);
@@ -519,6 +546,17 @@ export class BirthChartService {
         description: ASCENDENTE_DESCRIPTIONS[ascSign] ?? '',
       },
       chartUrl,
+      ...(process.env.NODE_ENV !== 'production'
+        ? {
+            debug: {
+              provider: {
+                sun: { sign: sunData.sign, degree: sunData.degree },
+                moon: { sign: moonData.sign, degree: moonData.degree },
+                ascendant: { sign: ascData.sign, degree: ascData.degree },
+              },
+            },
+          }
+        : {}),
     };
 
     await this.prisma.preview.create({
