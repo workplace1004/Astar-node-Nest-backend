@@ -107,6 +107,50 @@ function computeTimezoneOffsetHours(dateIso: string, time24: string, timezone: s
   return sign * (hours + minutes / 60);
 }
 
+function isHttpUrl(value: unknown): value is string {
+  return typeof value === 'string' && /^https?:\/\//i.test(value.trim());
+}
+
+function findChartUrlInObject(input: unknown): string | null {
+  if (!input || typeof input !== 'object') return null;
+  const obj = input as Record<string, unknown>;
+  const directKeys = ['chart_url', 'chartUrl', 'url', 'image_url', 'imageUrl', 'chart'];
+  for (const key of directKeys) {
+    const value = obj[key];
+    if (isHttpUrl(value)) return value.trim();
+  }
+  const nestedKeys = ['data', 'result', 'response'];
+  for (const key of nestedKeys) {
+    const nestedValue = obj[key];
+    if (nestedValue && typeof nestedValue === 'object') {
+      const nestedUrl = findChartUrlInObject(nestedValue);
+      if (nestedUrl) return nestedUrl;
+    }
+  }
+  return null;
+}
+
+function findSvgDataUriInObject(input: unknown): string | null {
+  if (!input || typeof input !== 'object') return null;
+  const obj = input as Record<string, unknown>;
+  const svgKeys = ['svg', 'svg_data', 'svgData', 'image_svg'];
+  for (const key of svgKeys) {
+    const value = obj[key];
+    if (typeof value === 'string' && value.trim().startsWith('<svg')) {
+      return `data:image/svg+xml;utf8,${encodeURIComponent(value)}`;
+    }
+  }
+  const nestedKeys = ['data', 'result', 'response'];
+  for (const key of nestedKeys) {
+    const nestedValue = obj[key];
+    if (nestedValue && typeof nestedValue === 'object') {
+      const nestedSvgUri = findSvgDataUriInObject(nestedValue);
+      if (nestedSvgUri) return nestedSvgUri;
+    }
+  }
+  return null;
+}
+
 @Injectable()
 export class BirthChartService {
   constructor(private readonly prisma: PrismaService) {}
@@ -194,7 +238,15 @@ export class BirthChartService {
         tzone: resolvedTzone,
       }),
     });
-    const wheelBody = await wheelRes.json().catch(() => ({}));
+    const wheelRaw = await wheelRes.text();
+    let wheelBody: unknown = {};
+    if (wheelRaw.trim().length > 0) {
+      try {
+        wheelBody = JSON.parse(wheelRaw) as unknown;
+      } catch {
+        wheelBody = wheelRaw;
+      }
+    }
     if (!wheelRes.ok) {
       throw new BadRequestException(
         (wheelBody as { msg?: string; message?: string }).msg ??
@@ -202,9 +254,14 @@ export class BirthChartService {
           'No se pudo generar el dibujo de la carta astral.',
       );
     }
-    const chartUrl = (wheelBody as { chart_url?: string }).chart_url;
+    const chartUrl =
+      (typeof wheelBody === 'string' && isHttpUrl(wheelBody) ? wheelBody.trim() : null) ??
+      findChartUrlInObject(wheelBody) ??
+      findSvgDataUriInObject(wheelBody);
     if (typeof chartUrl !== 'string' || chartUrl.trim().length === 0) {
-      throw new BadRequestException('La API no devolvió el dibujo de la carta astral.');
+      throw new BadRequestException(
+        'La API no devolvió el dibujo de la carta astral (chart_url/url). Verifica formato de respuesta del proveedor.',
+      );
     }
 
     const result: BirthChartPreviewResult = {
