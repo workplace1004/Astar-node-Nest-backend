@@ -180,6 +180,20 @@ function describePayloadShape(payload: unknown, rawText: string): string {
   return String(payload);
 }
 
+function extractProviderErrorMessage(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object') return null;
+  const obj = payload as Record<string, unknown>;
+  const direct =
+    (typeof obj.errorMessage === 'string' && obj.errorMessage.trim()) ||
+    (typeof obj.message === 'string' && obj.message.trim()) ||
+    (typeof obj.msg === 'string' && obj.msg.trim()) ||
+    (typeof obj.error === 'string' && obj.error.trim());
+  if (direct) return direct;
+  const nested = obj.error ?? obj.response ?? obj.data ?? obj.result;
+  if (nested && typeof nested === 'object') return extractProviderErrorMessage(nested);
+  return null;
+}
+
 function findChartUrlInObject(input: unknown): string | null {
   if (!input) return null;
   if (Array.isArray(input)) {
@@ -353,10 +367,13 @@ export class BirthChartService {
     }
     if (!wheelRes.ok) {
       throw new BadRequestException(
-        (wheelBody as { msg?: string; message?: string }).msg ??
-          (wheelBody as { msg?: string; message?: string }).message ??
+        extractProviderErrorMessage(wheelBody) ??
           'No se pudo generar el dibujo de la carta astral.',
       );
+    }
+    const providerError = extractProviderErrorMessage(wheelBody);
+    if (providerError && !findChartUrlInObject(wheelBody) && !findSvgDataUriInObject(wheelBody)) {
+      throw new BadRequestException(`Proveedor astrológico devolvió error: ${providerError}`);
     }
     const chartUrl =
       normalizeChartString(wheelBody) ??
