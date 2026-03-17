@@ -343,7 +343,6 @@ export class BirthChartService {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Basic ${auth}`,
-        'Accept-Language': 'es',
       },
       body: JSON.stringify({
         day,
