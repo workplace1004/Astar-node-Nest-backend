@@ -127,6 +127,59 @@ function looksLikeSvgBase64(value: unknown): value is string {
   return normalized.startsWith('PHN2Zy') || normalized.startsWith('PD94bWwg');
 }
 
+function normalizeChartString(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (isHttpUrl(trimmed) || isDataImageUri(trimmed)) return trimmed;
+  if (/^\/\//.test(trimmed)) return `https:${trimmed}`;
+  if (looksLikeSvgMarkup(trimmed)) return `data:image/svg+xml;utf8,${encodeURIComponent(trimmed)}`;
+  if (looksLikeSvgBase64(trimmed)) return `data:image/svg+xml;base64,${trimmed}`;
+  return null;
+}
+
+function tryExtractChartFromRawText(rawText: string): string | null {
+  const normalizedDirect = normalizeChartString(rawText);
+  if (normalizedDirect) return normalizedDirect;
+
+  const trimmed = rawText.trim();
+  const maybeJson =
+    (trimmed.startsWith('{') && trimmed.endsWith('}')) ||
+    (trimmed.startsWith('[') && trimmed.endsWith(']')) ||
+    (trimmed.startsWith('"') && trimmed.endsWith('"'));
+  if (maybeJson) {
+    try {
+      const parsed = JSON.parse(trimmed) as unknown;
+      const fromParsed =
+        normalizeChartString(parsed) ?? findChartUrlInObject(parsed) ?? findSvgDataUriInObject(parsed);
+      if (fromParsed) return fromParsed;
+    } catch {
+      // Keep fallback regex extraction below.
+    }
+  }
+
+  const urlMatch = rawText.match(/https?:\/\/[^\s"']+/i);
+  if (urlMatch && urlMatch[0]) return urlMatch[0].trim();
+  return null;
+}
+
+function describePayloadShape(payload: unknown, rawText: string): string {
+  if (typeof payload === 'string') {
+    const snippet = payload.trim().slice(0, 120).replace(/\s+/g, ' ');
+    return `string:${snippet || '[vacio]'}`;
+  }
+  if (Array.isArray(payload)) return `array(len=${payload.length})`;
+  if (payload && typeof payload === 'object') {
+    const keys = Object.keys(payload as Record<string, unknown>).slice(0, 10);
+    return `object(keys=${keys.join(',') || 'sin-claves'})`;
+  }
+  if (rawText.trim().length > 0) {
+    const snippet = rawText.trim().slice(0, 120).replace(/\s+/g, ' ');
+    return `raw:${snippet}`;
+  }
+  return String(payload);
+}
+
 function findChartUrlInObject(input: unknown): string | null {
   if (!input) return null;
   if (Array.isArray(input)) {
@@ -141,9 +194,8 @@ function findChartUrlInObject(input: unknown): string | null {
   const directKeys = ['chart_url', 'chartUrl', 'url', 'image_url', 'imageUrl', 'chart', 'chart_image', 'chartImage'];
   for (const key of directKeys) {
     const value = obj[key];
-    if (isHttpUrl(value) || isDataImageUri(value)) return value.trim();
-    if (looksLikeSvgMarkup(value)) return `data:image/svg+xml;utf8,${encodeURIComponent(value)}`;
-    if (looksLikeSvgBase64(value)) return `data:image/svg+xml;base64,${value.trim()}`;
+    const normalized = normalizeChartString(value);
+    if (normalized) return normalized;
   }
   const nestedKeys = ['data', 'result', 'response'];
   for (const key of nestedKeys) {
@@ -156,9 +208,8 @@ function findChartUrlInObject(input: unknown): string | null {
   // Fallback: scan unknown object shape to tolerate provider format changes.
   for (const value of Object.values(obj)) {
     if (!value) continue;
-    if (isHttpUrl(value) || isDataImageUri(value)) return value.trim();
-    if (looksLikeSvgMarkup(value)) return `data:image/svg+xml;utf8,${encodeURIComponent(value)}`;
-    if (looksLikeSvgBase64(value)) return `data:image/svg+xml;base64,${value.trim()}`;
+    const normalized = normalizeChartString(value);
+    if (normalized) return normalized;
     if (typeof value === 'object') {
       const nestedUrl = findChartUrlInObject(value);
       if (nestedUrl) return nestedUrl;
@@ -181,11 +232,8 @@ function findSvgDataUriInObject(input: unknown): string | null {
   const svgKeys = ['svg', 'svg_data', 'svgData', 'image_svg', 'base64', 'chart_data', 'chartData'];
   for (const key of svgKeys) {
     const value = obj[key];
-    if (looksLikeSvgMarkup(value)) {
-      return `data:image/svg+xml;utf8,${encodeURIComponent(value)}`;
-    }
-    if (isDataImageUri(value)) return value.trim();
-    if (looksLikeSvgBase64(value)) return `data:image/svg+xml;base64,${value.trim()}`;
+    const normalized = normalizeChartString(value);
+    if (normalized) return normalized;
   }
   const nestedKeys = ['data', 'result', 'response'];
   for (const key of nestedKeys) {
@@ -197,9 +245,8 @@ function findSvgDataUriInObject(input: unknown): string | null {
   }
   for (const value of Object.values(obj)) {
     if (!value) continue;
-    if (looksLikeSvgMarkup(value)) return `data:image/svg+xml;utf8,${encodeURIComponent(value)}`;
-    if (isDataImageUri(value)) return value.trim();
-    if (looksLikeSvgBase64(value)) return `data:image/svg+xml;base64,${value.trim()}`;
+    const normalized = normalizeChartString(value);
+    if (normalized) return normalized;
     if (typeof value === 'object') {
       const nestedSvgUri = findSvgDataUriInObject(value);
       if (nestedSvgUri) return nestedSvgUri;
@@ -312,16 +359,14 @@ export class BirthChartService {
       );
     }
     const chartUrl =
-      (typeof wheelBody === 'string' && (isHttpUrl(wheelBody) || isDataImageUri(wheelBody)) ? wheelBody.trim() : null) ??
-      (typeof wheelBody === 'string' && looksLikeSvgMarkup(wheelBody)
-        ? `data:image/svg+xml;utf8,${encodeURIComponent(wheelBody)}`
-        : null) ??
-      (typeof wheelBody === 'string' && looksLikeSvgBase64(wheelBody) ? `data:image/svg+xml;base64,${wheelBody.trim()}` : null) ??
+      normalizeChartString(wheelBody) ??
+      (typeof wheelBody === 'string' ? tryExtractChartFromRawText(wheelBody) : null) ??
       findChartUrlInObject(wheelBody) ??
-      findSvgDataUriInObject(wheelBody);
+      findSvgDataUriInObject(wheelBody) ??
+      tryExtractChartFromRawText(wheelRaw);
     if (typeof chartUrl !== 'string' || chartUrl.trim().length === 0) {
       throw new BadRequestException(
-        'La API no devolvió el dibujo de la carta astral (chart_url/url). Verifica formato de respuesta del proveedor.',
+        `La API no devolvió el dibujo de la carta astral (chart_url/url). Verifica formato de respuesta del proveedor. Formato recibido: ${describePayloadShape(wheelBody, wheelRaw)}`,
       );
     }
 
