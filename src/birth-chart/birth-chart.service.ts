@@ -128,12 +128,22 @@ function looksLikeSvgBase64(value: unknown): value is string {
 }
 
 function findChartUrlInObject(input: unknown): string | null {
-  if (!input || typeof input !== 'object') return null;
+  if (!input) return null;
+  if (Array.isArray(input)) {
+    for (const item of input) {
+      const found = findChartUrlInObject(item);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof input !== 'object') return null;
   const obj = input as Record<string, unknown>;
   const directKeys = ['chart_url', 'chartUrl', 'url', 'image_url', 'imageUrl', 'chart', 'chart_image', 'chartImage'];
   for (const key of directKeys) {
     const value = obj[key];
     if (isHttpUrl(value) || isDataImageUri(value)) return value.trim();
+    if (looksLikeSvgMarkup(value)) return `data:image/svg+xml;utf8,${encodeURIComponent(value)}`;
+    if (looksLikeSvgBase64(value)) return `data:image/svg+xml;base64,${value.trim()}`;
   }
   const nestedKeys = ['data', 'result', 'response'];
   for (const key of nestedKeys) {
@@ -143,11 +153,30 @@ function findChartUrlInObject(input: unknown): string | null {
       if (nestedUrl) return nestedUrl;
     }
   }
+  // Fallback: scan unknown object shape to tolerate provider format changes.
+  for (const value of Object.values(obj)) {
+    if (!value) continue;
+    if (isHttpUrl(value) || isDataImageUri(value)) return value.trim();
+    if (looksLikeSvgMarkup(value)) return `data:image/svg+xml;utf8,${encodeURIComponent(value)}`;
+    if (looksLikeSvgBase64(value)) return `data:image/svg+xml;base64,${value.trim()}`;
+    if (typeof value === 'object') {
+      const nestedUrl = findChartUrlInObject(value);
+      if (nestedUrl) return nestedUrl;
+    }
+  }
   return null;
 }
 
 function findSvgDataUriInObject(input: unknown): string | null {
-  if (!input || typeof input !== 'object') return null;
+  if (!input) return null;
+  if (Array.isArray(input)) {
+    for (const item of input) {
+      const found = findSvgDataUriInObject(item);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (typeof input !== 'object') return null;
   const obj = input as Record<string, unknown>;
   const svgKeys = ['svg', 'svg_data', 'svgData', 'image_svg', 'base64', 'chart_data', 'chartData'];
   for (const key of svgKeys) {
@@ -163,6 +192,16 @@ function findSvgDataUriInObject(input: unknown): string | null {
     const nestedValue = obj[key];
     if (nestedValue && typeof nestedValue === 'object') {
       const nestedSvgUri = findSvgDataUriInObject(nestedValue);
+      if (nestedSvgUri) return nestedSvgUri;
+    }
+  }
+  for (const value of Object.values(obj)) {
+    if (!value) continue;
+    if (looksLikeSvgMarkup(value)) return `data:image/svg+xml;utf8,${encodeURIComponent(value)}`;
+    if (isDataImageUri(value)) return value.trim();
+    if (looksLikeSvgBase64(value)) return `data:image/svg+xml;base64,${value.trim()}`;
+    if (typeof value === 'object') {
+      const nestedSvgUri = findSvgDataUriInObject(value);
       if (nestedSvgUri) return nestedSvgUri;
     }
   }
