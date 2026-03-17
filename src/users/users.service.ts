@@ -127,17 +127,30 @@ export class UsersService {
   }
 
   async getStats() {
-    const [total, activeSubs, inactiveSubs, cancelledSubs] = await Promise.all([
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+
+    const [total, activeSubs, inactiveSubs, cancelledSubs, previewsTotal, previewsThisMonth] = await Promise.all([
       this.prisma.user.count({ where: { role: 'client' } }),
       this.prisma.user.count({ where: { role: 'client', subscriptionStatus: 'active' } }),
       this.prisma.user.count({ where: { role: 'client', subscriptionStatus: 'inactive' } }),
       this.prisma.user.count({ where: { role: 'client', subscriptionStatus: 'cancelled' } }),
+      this.prisma.preview.count(),
+      this.prisma.preview.count({ where: { createdAt: { gte: monthStart } } }),
     ]);
+    const providerCallsPerPreview = 2; // natal_wheel_chart + planets/tropical
     return {
       totalUsers: total,
       activeSubscriptions: activeSubs,
       inactiveSubscriptions: inactiveSubs,
       cancelledSubscriptions: cancelledSubs,
+      astrologyApiUsage: {
+        previewsTotal,
+        previewsThisMonth,
+        providerCallsEstimatedTotal: previewsTotal * providerCallsPerPreview,
+        providerCallsEstimatedThisMonth: previewsThisMonth * providerCallsPerPreview,
+      },
     };
   }
 
