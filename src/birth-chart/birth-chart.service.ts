@@ -242,48 +242,54 @@ function parseSignFromNode(value: unknown): string | null {
 }
 
 function findPlanetSignInPayload(input: unknown, planetAliases: string[]): string | null {
-  const aliases = planetAliases.map((a) => normalizeKey(a));
-  if (!input) return null;
-  if (Array.isArray(input)) {
-    for (const item of input) {
-      const found = findPlanetSignInPayload(item, planetAliases);
+  const aliases = new Set(planetAliases.map((a) => normalizeKey(a)));
+  const visited = new Set<unknown>();
+
+  const tryObject = (obj: Record<string, unknown>): string | null => {
+    const nameCandidates = [obj.name, obj.planet, obj.object, obj.id]
+      .filter((v): v is string => typeof v === 'string')
+      .map((v) => normalizeKey(v));
+    if (nameCandidates.some((n) => aliases.has(n))) {
+      return parseSignFromNode(obj);
+    }
+
+    // Fallback for keyed maps like { sun: { sign: "Sagittarius" } }
+    for (const alias of aliases) {
+      if (alias in obj) {
+        const sign = parseSignFromNode(obj[alias]);
+        if (sign) return sign;
+      }
+    }
+    return null;
+  };
+
+  const scan = (node: unknown): string | null => {
+    if (!node || typeof node !== 'object') return null;
+    if (visited.has(node)) return null;
+    visited.add(node);
+
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const found = scan(item);
+        if (found) return found;
+      }
+      return null;
+    }
+
+    const obj = node as Record<string, unknown>;
+    const direct = tryObject(obj);
+    if (direct) return direct;
+
+    // Only traverse known containers to avoid matching unrelated nested sign fields.
+    const containers = [obj.data, obj.result, obj.response, obj.planets, obj.items];
+    for (const container of containers) {
+      const found = scan(container);
       if (found) return found;
     }
     return null;
-  }
-  if (typeof input !== 'object') return null;
-  const obj = input as Record<string, unknown>;
+  };
 
-  const nameCandidates = [obj.name, obj.planet, obj.object, obj.id]
-    .filter((v): v is string => typeof v === 'string')
-    .map((v) => normalizeKey(v));
-  if (nameCandidates.some((n) => aliases.includes(n))) {
-    const signFromItem = parseSignFromNode(obj);
-    if (signFromItem) return signFromItem;
-  }
-
-  for (const alias of aliases) {
-    const direct = obj[alias] ?? obj[alias.toUpperCase()] ?? obj[alias.toLowerCase()];
-    const directSign = parseSignFromNode(direct);
-    if (directSign) return directSign;
-  }
-
-  const nestedKeys = ['data', 'result', 'response', 'planets', 'items'];
-  for (const key of nestedKeys) {
-    const nested = obj[key];
-    if (nested && typeof nested === 'object') {
-      const found = findPlanetSignInPayload(nested, planetAliases);
-      if (found) return found;
-    }
-  }
-
-  for (const value of Object.values(obj)) {
-    if (value && typeof value === 'object') {
-      const found = findPlanetSignInPayload(value, planetAliases);
-      if (found) return found;
-    }
-  }
-  return null;
+  return scan(input);
 }
 
 function findChartUrlInObject(input: unknown): string | null {
