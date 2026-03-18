@@ -7,6 +7,7 @@ type Provider = 'stripe' | 'mercadopago';
 type Billing = 'monthly' | 'annual';
 type Plan = 'essentials' | 'portal' | 'depth';
 type ExtraType = 'extra_question' | 'private_session';
+type ReportType = 'birth_chart' | 'solar_return' | 'numerology';
 
 export interface CheckoutResult {
   provider: Provider;
@@ -69,6 +70,36 @@ function decodeExternalReference(value: string | null | undefined): Record<strin
   } catch {
     return {};
   }
+}
+
+function normalizeBirthDate(date: string | null | undefined): string | null {
+  if (!date) return null;
+  const trimmed = date.trim();
+  if (!trimmed) return null;
+  const match = trimmed.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  return `${match[1]}-${match[2]}-${match[3]}`;
+}
+
+function calculateLifePathNumber(birthDate: string | null | undefined): string | null {
+  const normalized = normalizeBirthDate(birthDate);
+  if (!normalized) return null;
+  const digits = normalized.replace(/-/g, '').split('').map((d) => Number(d));
+  if (digits.some((d) => Number.isNaN(d))) return null;
+
+  const reduce = (n: number): number => {
+    // Preserve master numbers.
+    while (n > 9 && n !== 11 && n !== 22 && n !== 33) {
+      n = String(n)
+        .split('')
+        .map((d) => Number(d))
+        .reduce((acc, curr) => acc + curr, 0);
+    }
+    return n;
+  };
+
+  const total = digits.reduce((acc, curr) => acc + curr, 0);
+  return String(reduce(total));
 }
 
 @Injectable()
@@ -284,6 +315,121 @@ export class PaymentsService {
     return created.id;
   }
 
+  private getReportTypesForPlan(plan: string | undefined): ReportType[] {
+    const normalized = (plan ?? '').toLowerCase() as Plan | '';
+    if (normalized === 'essentials') {
+      return ['birth_chart', 'numerology'];
+    }
+    // Portal and Depth get all core reports.
+    return ['birth_chart', 'solar_return', 'numerology'];
+  }
+
+  private buildReportDraft(
+    type: ReportType,
+    user: { name?: string | null; birthDate?: string | null; birthPlace?: string | null; birthTime?: string | null },
+  ): { title: string; content: string } {
+    const firstName = (user.name ?? 'Cliente').trim().split(/\s+/)[0] || 'Cliente';
+    const birthDate = normalizeBirthDate(user.birthDate);
+    const birthPlace = user.birthPlace?.trim() || 'tu lugar de nacimiento';
+    const birthTime = user.birthTime?.trim() || 'tu hora de nacimiento';
+    const lifePath = calculateLifePathNumber(user.birthDate);
+
+    if (type === 'birth_chart') {
+      return {
+        title: 'Carta Natal',
+        content: JSON.stringify([
+          {
+            id: 'base-1',
+            title: 'Tu carta de base',
+            content: `Hola ${firstName}. Activamos tu Carta Natal con los datos de nacimiento registrados (${birthDate ?? 'fecha pendiente'}, ${birthTime}, ${birthPlace}).`,
+          },
+          {
+            id: 'base-2',
+            title: 'Cómo usar este reporte',
+            content:
+              'Esta versión inicial te sirve como punto de partida. Desde el panel podrás recibir versiones ampliadas y personalizadas según tu proceso.',
+          },
+        ]),
+      };
+    }
+
+    if (type === 'solar_return') {
+      return {
+        title: 'Revolución Solar',
+        content: JSON.stringify({
+          theme: {
+            title: 'Apertura de ciclo anual',
+            subtitle: `Tu revolución solar para ${firstName} ya está habilitada.`,
+          },
+          sections: [
+            {
+              id: 'focus',
+              title: 'Enfoque del año',
+              content:
+                'Este reporte se activa con tu suscripción y se irá enriqueciendo con contenidos de seguimiento durante el año.',
+            },
+            {
+              id: 'integration',
+              title: 'Integración práctica',
+              content:
+                'Te recomendamos revisarlo junto con tus mensajes y preguntas para conectar los tránsitos con decisiones concretas.',
+            },
+          ],
+        }),
+      };
+    }
+
+    return {
+      title: 'Numerología',
+      content: JSON.stringify({
+        numbers: [
+          {
+            number: lifePath ?? '—',
+            label: 'Camino de Vida',
+            desc: lifePath ? `Calculado desde tu fecha de nacimiento registrada (${birthDate}).` : 'Completa tu fecha de nacimiento para calcularlo automáticamente.',
+          },
+        ],
+        interpretations: [
+          {
+            id: 'base',
+            title: 'Interpretación inicial',
+            content:
+              'Activamos tu reporte de numerología. Esta versión base se ampliará con más capas interpretativas dentro del portal.',
+          },
+        ],
+      }),
+    };
+  }
+
+  private async ensureSubscriptionReports(userId: string, plan: string | undefined): Promise<void> {
+    const requiredTypes = this.getReportTypesForPlan(plan);
+    const user = await this.usersService.findById(userId);
+    if (!user) return;
+
+    const existing = await this.prisma.report.findMany({
+      where: { userId, type: { in: requiredTypes } },
+      select: { type: true },
+    });
+    const existingTypes = new Set(existing.map((r) => r.type));
+
+    const missingTypes = requiredTypes.filter((type) => !existingTypes.has(type));
+    if (missingTypes.length === 0) return;
+
+    await Promise.all(
+      missingTypes.map((type) => {
+        const draft = this.buildReportDraft(type, user);
+        return this.prisma.report.create({
+          data: {
+            userId,
+            type,
+            title: draft.title,
+            content: draft.content,
+          },
+        });
+      }),
+    );
+  }
+
   async confirmStripeSession(userId: string, sessionId: string) {
     await this.requireClient(userId);
     if (!sessionId?.trim()) throw new BadRequestException('sessionId is required');
@@ -319,6 +465,7 @@ export class PaymentsService {
 
     if (paymentKind === 'subscription') {
       await this.usersService.updateSubscription(userId, 'active');
+      await this.ensureSubscriptionReports(userId, metadata.plan);
     }
 
     return {
@@ -356,6 +503,7 @@ export class PaymentsService {
     });
     if (paymentKind === 'subscription') {
       await this.usersService.updateSubscription(userId, 'active');
+      await this.ensureSubscriptionReports(userId, metadata.plan);
     }
 
     return {
@@ -410,6 +558,7 @@ export class PaymentsService {
 
     if (paymentKind === 'subscription') {
       await this.usersService.updateSubscription(userId, 'active');
+      await this.ensureSubscriptionReports(userId, metadata.plan ?? refData.plan);
     }
 
     return {
