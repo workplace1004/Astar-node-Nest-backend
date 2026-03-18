@@ -62,6 +62,8 @@ const ASCENDENTE_DESCRIPTIONS: Record<string, string> = {
   Piscis: 'Con Ascendente en Piscis proyectas suavidad e intuición. Transmites empatía y un aura algo evasiva.',
 };
 
+const CONTENT_STYLE_CATEGORY_TITLE = '__content_style_config__';
+
 export interface BirthChartPreviewDto {
   birthDate: string;  // YYYY-MM-DD
   birthTime: string;  // HH:mm
@@ -394,6 +396,27 @@ function findSvgDataUriInObject(input: unknown): string | null {
 @Injectable()
 export class BirthChartService {
   constructor(private readonly prisma: PrismaService) {}
+
+  async getContentStyleConfig(): Promise<unknown | null> {
+    try {
+      const category = await this.prisma.knowledgeCategory.findFirst({
+        where: { title: CONTENT_STYLE_CATEGORY_TITLE },
+        include: {
+          entries: {
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+          },
+        },
+      });
+      const raw = category?.entries?.[0]?.content;
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
+  }
 
   private async getInterpretationMaps(): Promise<{
     sun: Record<string, string>;

@@ -1,9 +1,11 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards, NotFoundException } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards, NotFoundException } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { AdminGuard } from '../auth/admin.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { UsersService } from '../users/users.service';
 import { PrismaService } from '../prisma/prisma.service';
+
+const CONTENT_STYLE_CATEGORY_TITLE = '__content_style_config__';
 
 @Controller('admin')
 @UseGuards(JwtAuthGuard, AdminGuard)
@@ -265,6 +267,51 @@ export class AdminController {
       description: updated.description,
       updatedAt: updated.updatedAt.toISOString(),
     };
+  }
+
+  @Get('content-style')
+  async getContentStyle() {
+    const config = await this.readContentStyleConfig();
+    return { config };
+  }
+
+  @Patch('content-style')
+  async updateContentStyle(@Body() body: { config?: unknown }) {
+    const incoming = body?.config;
+    if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) {
+      throw new BadRequestException('config object is required');
+    }
+
+    const serialized = JSON.stringify(incoming);
+    const category =
+      (await this.prisma.knowledgeCategory.findFirst({
+        where: { title: CONTENT_STYLE_CATEGORY_TITLE },
+      })) ??
+      (await this.prisma.knowledgeCategory.create({
+        data: { title: CONTENT_STYLE_CATEGORY_TITLE },
+      }));
+
+    const existingEntry = await this.prisma.knowledgeEntry.findFirst({
+      where: { categoryId: category.id },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (existingEntry) {
+      await this.prisma.knowledgeEntry.update({
+        where: { id: existingEntry.id },
+        data: { content: serialized },
+      });
+    } else {
+      await this.prisma.knowledgeEntry.create({
+        data: {
+          categoryId: category.id,
+          content: serialized,
+        },
+      });
+    }
+
+    const config = await this.readContentStyleConfig();
+    return { config };
   }
 
   @Get('questions')
@@ -549,5 +596,26 @@ export class AdminController {
       createdAt: message.createdAt.toISOString(),
       fromAdmin: true,
     };
+  }
+
+  private async readContentStyleConfig(): Promise<unknown | null> {
+    try {
+      const category = await this.prisma.knowledgeCategory.findFirst({
+        where: { title: CONTENT_STYLE_CATEGORY_TITLE },
+        include: {
+          entries: {
+            orderBy: { createdAt: 'desc' },
+            take: 1,
+          },
+        },
+      });
+      const raw = category?.entries?.[0]?.content;
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+      return parsed;
+    } catch {
+      return null;
+    }
   }
 }
