@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable } from '@nestjs/common';
+import { AstrologyClient, AstrologyError } from '@astro-api/astroapi-typescript';
 import { PrismaService } from '../prisma/prisma.service';
 
 const SIGNS_ES = [
@@ -216,24 +217,35 @@ function toSpanishSign(signValue: unknown): string | null {
   const key = normalizeKey(signValue);
   const map: Record<string, string> = {
     aries: 'Aries',
+    ari: 'Aries',
     tauro: 'Tauro',
     taurus: 'Tauro',
+    tau: 'Tauro',
     geminis: 'Géminis',
     gemini: 'Géminis',
+    gem: 'Géminis',
     cancer: 'Cáncer',
+    can: 'Cáncer',
     leo: 'Leo',
     virgo: 'Virgo',
+    vir: 'Virgo',
     libra: 'Libra',
+    lib: 'Libra',
     escorpio: 'Escorpio',
     scorpio: 'Escorpio',
+    sco: 'Escorpio',
     sagitario: 'Sagitario',
     sagittarius: 'Sagitario',
+    sag: 'Sagitario',
     capricornio: 'Capricornio',
     capricorn: 'Capricornio',
+    cap: 'Capricornio',
     acuario: 'Acuario',
     aquarius: 'Acuario',
+    aqu: 'Acuario',
     piscis: 'Piscis',
     pisces: 'Piscis',
+    pis: 'Piscis',
   };
   return map[key] ?? null;
 }
@@ -253,7 +265,7 @@ function parseSignFromNode(value: unknown): string | null {
 function parseDegreeFromNode(value: unknown): number | null {
   if (!value || typeof value !== 'object') return null;
   const obj = value as Record<string, unknown>;
-  const candidates = [obj.normDegree, obj.fullDegree, obj.degree, obj.norm_degree, obj.full_degree];
+  const candidates = [obj.degree, obj.normDegree, obj.fullDegree, obj.norm_degree, obj.full_degree];
   for (const item of candidates) {
     if (typeof item === 'number' && Number.isFinite(item)) return item;
     if (typeof item === 'string') {
@@ -262,6 +274,21 @@ function parseDegreeFromNode(value: unknown): number | null {
     }
   }
   return null;
+}
+
+/**
+ * Astrology API v3 (astrology-api.io) uses IANA zones. When the client only sends a numeric
+ * offset, approximate with Etc/GMT* for whole-hour offsets (Etc/GMT sign is inverted vs UTC offset).
+ */
+function ianaTimezoneForBirth(iana: string | undefined, offsetHours: number): string | undefined {
+  const trimmed = iana?.trim();
+  if (trimmed) return trimmed;
+  if (!Number.isFinite(offsetHours)) return undefined;
+  const rounded = Math.round(offsetHours * 2) / 2;
+  if (rounded % 1 !== 0) return undefined;
+  const n = Math.trunc(Math.abs(rounded));
+  if (n === 0) return 'Etc/UTC';
+  return rounded > 0 ? `Etc/GMT-${n}` : `Etc/GMT+${n}`;
 }
 
 function findPlanetDataInPayload(input: unknown, planetAliases: string[]): { sign: string; degree: number | null } | null {
@@ -471,10 +498,9 @@ export class BirthChartService {
       throw new BadRequestException('Email inválido.');
     }
 
-    const astrologyApiUserId = process.env.ASTROLOGY_API_USER_ID?.trim();
     const astrologyApiKey = process.env.ASTROLOGY_API_KEY?.trim();
-    if (!astrologyApiUserId || !astrologyApiKey) {
-      throw new BadRequestException('La API astrológica no está configurada en backend.');
+    if (!astrologyApiKey) {
+      throw new BadRequestException('La API astrológica no está configurada en backend (ASTROLOGY_API_KEY).');
     }
     if (typeof dto.lat !== 'number' || !Number.isFinite(dto.lat) || typeof dto.lon !== 'number' || !Number.isFinite(dto.lon)) {
       throw new BadRequestException('Latitud y longitud son obligatorias para generar la carta astral.');
@@ -493,91 +519,56 @@ export class BirthChartService {
 
     const [year, month, day] = dto.birthDate.split('-').map(Number);
     const [hour, minute] = dto.birthTime.split(':').map(Number);
-    const auth = Buffer.from(`${astrologyApiUserId}:${astrologyApiKey}`).toString('base64');
-    const providerPayload = {
-      day,
-      month,
-      year,
-      hour: Number.isFinite(hour) ? hour : 12,
-      min: Number.isFinite(minute) ? minute : 0,
-      lat: dto.lat,
-      lon: dto.lon,
-      tzone: resolvedTzone,
+    const birthHour = Number.isFinite(hour) ? hour : 12;
+    const birthMinute = Number.isFinite(minute) ? minute : 0;
+    const tzIana = ianaTimezoneForBirth(timezoneFromInput, resolvedTzone);
+    const place = dto.birthPlace?.trim();
+
+    const client = new AstrologyClient({ apiKey: astrologyApiKey });
+    const subject = {
+      name: email.split('@')[0] || 'Usuario',
+      birth_data: {
+        year,
+        month,
+        day,
+        hour: birthHour,
+        minute: birthMinute,
+        second: 0,
+        latitude: dto.lat,
+        longitude: dto.lon,
+        ...(place ? { city: place } : {}),
+        ...(tzIana ? { timezone: tzIana } : {}),
+      },
     };
-    const [wheelRes, planetsRes] = await Promise.all([
-      fetch('https://json.astrologyapi.com/v1/natal_wheel_chart', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Basic ${auth}`,
-        },
-        body: JSON.stringify(providerPayload),
-      }),
-      fetch('https://json.astrologyapi.com/v1/planets/tropical', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Basic ${auth}`,
-        },
-        body: JSON.stringify(providerPayload),
-      }),
-    ]);
-    const wheelRaw = await wheelRes.text();
-    let wheelBody: unknown = {};
-    if (wheelRaw.trim().length > 0) {
-      try {
-        wheelBody = JSON.parse(wheelRaw) as unknown;
-      } catch {
-        wheelBody = wheelRaw;
-      }
+
+    let svgMarkup: string;
+    let positionsPayload: { planets: unknown[] };
+    try {
+      const [svg, positionsRes] = await Promise.all([
+        client.svg.getNatalChartSvg({ subject }),
+        client.data.getPositions({ subject }),
+      ]);
+      svgMarkup = svg;
+      positionsPayload = { planets: positionsRes.positions ?? [] };
+    } catch (err) {
+      const astroErr = AstrologyError.normalize(err);
+      throw new BadRequestException(astroErr.message || 'Error del proveedor astrológico (Astrology API).');
     }
-    if (!wheelRes.ok) {
-      throw new BadRequestException(
-        extractProviderErrorMessage(wheelBody) ??
-          'No se pudo generar el dibujo de la carta astral.',
-      );
-    }
-    const providerError = extractProviderErrorMessage(wheelBody);
-    if (providerError && !findChartUrlInObject(wheelBody) && !findSvgDataUriInObject(wheelBody)) {
-      throw new BadRequestException(`Proveedor astrológico devolvió error: ${providerError}`);
-    }
+
     const chartUrl =
-      normalizeChartString(wheelBody) ??
-      (typeof wheelBody === 'string' ? tryExtractChartFromRawText(wheelBody) : null) ??
-      findChartUrlInObject(wheelBody) ??
-      findSvgDataUriInObject(wheelBody) ??
-      tryExtractChartFromRawText(wheelRaw);
+      normalizeChartString(svgMarkup) ?? tryExtractChartFromRawText(svgMarkup);
     if (typeof chartUrl !== 'string' || chartUrl.trim().length === 0) {
       throw new BadRequestException(
-        `La API no devolvió el dibujo de la carta astral (chart_url/url). Verifica formato de respuesta del proveedor. Formato recibido: ${describePayloadShape(wheelBody, wheelRaw)}`,
+        `La API no devolvió el dibujo de la carta astral (SVG). Formato recibido: ${describePayloadShape(svgMarkup, typeof svgMarkup === 'string' ? svgMarkup : '')}`,
       );
     }
 
-    const planetsRaw = await planetsRes.text();
-    let planetsBody: unknown = {};
-    if (planetsRaw.trim().length > 0) {
-      try {
-        planetsBody = JSON.parse(planetsRaw) as unknown;
-      } catch {
-        planetsBody = planetsRaw;
-      }
-    }
-    if (!planetsRes.ok) {
-      throw new BadRequestException(
-        `No se pudieron obtener posiciones planetarias del proveedor: ${extractProviderErrorMessage(planetsBody) ?? 'error desconocido'}`,
-      );
-    }
-    const planetsError = extractProviderErrorMessage(planetsBody);
-    if (planetsError) {
-      throw new BadRequestException(`Proveedor astrológico devolvió error en planets/tropical: ${planetsError}`);
-    }
-
-    const sunData = findPlanetDataInPayload(planetsBody, ['sun', 'sol']);
-    const moonData = findPlanetDataInPayload(planetsBody, ['moon', 'luna']);
-    const ascData = findPlanetDataInPayload(planetsBody, ['ascendant', 'asc', 'lagna']);
+    const sunData = findPlanetDataInPayload(positionsPayload, ['sun', 'sol']);
+    const moonData = findPlanetDataInPayload(positionsPayload, ['moon', 'luna']);
+    const ascData = findPlanetDataInPayload(positionsPayload, ['ascendant', 'asc', 'lagna']);
     if (!sunData || !moonData || !ascData) {
       throw new BadRequestException(
-        `No se pudieron resolver Sol/Luna/Ascendente desde planets/tropical. Formato recibido: ${describePayloadShape(planetsBody, planetsRaw)}`,
+        `No se pudieron resolver Sol/Luna/Ascendente desde posiciones planetarias. Formato recibido: ${describePayloadShape(positionsPayload, JSON.stringify(positionsPayload).slice(0, 200))}`,
       );
     }
     const sunSign = sunData.sign;

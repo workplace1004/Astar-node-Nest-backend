@@ -139,7 +139,7 @@ export class UsersService {
       this.prisma.preview.count(),
       this.prisma.preview.count({ where: { createdAt: { gte: monthStart } } }),
     ]);
-    const providerCallsPerPreview = 2; // natal_wheel_chart + planets/tropical
+    const providerCallsPerPreview = 2; // Astrology API v3: svg/natal + data/positions
     return {
       totalUsers: total,
       activeSubscriptions: activeSubs,

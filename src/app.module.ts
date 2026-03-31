@@ -6,8 +6,18 @@ import { AdminModule } from './admin/admin.module';
 import { PortalModule } from './portal/portal.module';
 import { BirthChartModule } from './birth-chart/birth-chart.module';
 import { PaymentsModule } from './payments/payments.module';
+import { ExchangeModule } from './exchange/exchange.module';
 
 @Module({
-  imports: [PrismaModule, UsersModule, AuthModule, AdminModule, PortalModule, BirthChartModule, PaymentsModule],
+  imports: [
+    PrismaModule,
+    UsersModule,
+    AuthModule,
+    AdminModule,
+    PortalModule,
+    BirthChartModule,
+    PaymentsModule,
+    ExchangeModule,
+  ],
 })
 export class AppModule {}

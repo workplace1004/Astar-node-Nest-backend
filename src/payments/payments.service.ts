@@ -81,25 +81,122 @@ function normalizeBirthDate(date: string | null | undefined): string | null {
   return `${match[1]}-${match[2]}-${match[3]}`;
 }
 
+function parseBirthDateParts(birthDate: string | null | undefined): { year: number; month: number; day: number } | null {
+  const normalized = normalizeBirthDate(birthDate);
+  if (!normalized) return null;
+  const [yearRaw, monthRaw, dayRaw] = normalized.split('-');
+  const year = Number(yearRaw);
+  const month = Number(monthRaw);
+  const day = Number(dayRaw);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  return { year, month, day };
+}
+
+function reduceNumber(value: number, preserveMaster = true): number {
+  let current = Math.abs(Math.trunc(value));
+  while (current > 9 && (!preserveMaster || ![11, 22, 33].includes(current))) {
+    current = String(current)
+      .split('')
+      .map((d) => Number(d))
+      .reduce((acc, curr) => acc + curr, 0);
+  }
+  return current;
+}
+
 function calculateLifePathNumber(birthDate: string | null | undefined): string | null {
   const normalized = normalizeBirthDate(birthDate);
   if (!normalized) return null;
   const digits = normalized.replace(/-/g, '').split('').map((d) => Number(d));
   if (digits.some((d) => Number.isNaN(d))) return null;
+  return String(reduceNumber(digits.reduce((acc, curr) => acc + curr, 0), true));
+}
 
-  const reduce = (n: number): number => {
-    // Preserve master numbers.
-    while (n > 9 && n !== 11 && n !== 22 && n !== 33) {
-      n = String(n)
-        .split('')
-        .map((d) => Number(d))
-        .reduce((acc, curr) => acc + curr, 0);
-    }
-    return n;
+function calculateBirthdayNumber(day: number): number {
+  return reduceNumber(day, true);
+}
+
+function calculateAttitudeNumber(month: number, day: number): number {
+  return reduceNumber(month + day, true);
+}
+
+function calculatePersonalYear(month: number, day: number, year: number): number {
+  const universalYear = reduceNumber(year, false);
+  return reduceNumber(month + day + universalYear, true);
+}
+
+function mapNameCharsToNumber(fullName: string): { expression: number | null; soulUrge: number | null; personality: number | null } {
+  const map: Record<string, number> = {
+    A: 1, J: 1, S: 1,
+    B: 2, K: 2, T: 2,
+    C: 3, L: 3, U: 3,
+    D: 4, M: 4, V: 4,
+    E: 5, N: 5, W: 5,
+    F: 6, O: 6, X: 6,
+    G: 7, P: 7, Y: 7,
+    H: 8, Q: 8, Z: 8,
+    I: 9, R: 9,
   };
+  const normalized = fullName
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase();
+  const vowels = new Set(['A', 'E', 'I', 'O', 'U']);
+  let all = 0;
+  let vowelSum = 0;
+  let consonantSum = 0;
 
-  const total = digits.reduce((acc, curr) => acc + curr, 0);
-  return String(reduce(total));
+  for (const ch of normalized) {
+    const val = map[ch];
+    if (!val) continue;
+    all += val;
+    if (vowels.has(ch)) vowelSum += val;
+    else consonantSum += val;
+  }
+
+  return {
+    expression: all > 0 ? reduceNumber(all, true) : null,
+    soulUrge: vowelSum > 0 ? reduceNumber(vowelSum, true) : null,
+    personality: consonantSum > 0 ? reduceNumber(consonantSum, true) : null,
+  };
+}
+
+function getSunSignFromBirthDate(birthDate: string | null | undefined): string | null {
+  const parts = parseBirthDateParts(birthDate);
+  if (!parts) return null;
+  const md = parts.month * 100 + parts.day;
+  if (md >= 321 && md <= 419) return 'Aries';
+  if (md >= 420 && md <= 520) return 'Tauro';
+  if (md >= 521 && md <= 620) return 'Géminis';
+  if (md >= 621 && md <= 722) return 'Cáncer';
+  if (md >= 723 && md <= 822) return 'Leo';
+  if (md >= 823 && md <= 922) return 'Virgo';
+  if (md >= 923 && md <= 1022) return 'Libra';
+  if (md >= 1023 && md <= 1121) return 'Escorpio';
+  if (md >= 1122 && md <= 1221) return 'Sagitario';
+  if ((md >= 1222 && md <= 1231) || (md >= 101 && md <= 119)) return 'Capricornio';
+  if (md >= 120 && md <= 218) return 'Acuario';
+  if (md >= 219 && md <= 320) return 'Piscis';
+  return null;
+}
+
+function numberMeaning(n: string | number): string {
+  const key = String(n);
+  const map: Record<string, string> = {
+    '1': 'iniciativa, autonomía y liderazgo personal',
+    '2': 'cooperación, diplomacia y sensibilidad vincular',
+    '3': 'expresión creativa, comunicación y optimismo',
+    '4': 'orden, constancia, método y construcción sólida',
+    '5': 'cambio, libertad, adaptabilidad y movimiento',
+    '6': 'responsabilidad, cuidado, armonía y servicio',
+    '7': 'introspección, análisis, estudio y profundidad',
+    '8': 'gestión, logro material, estrategia y autoridad',
+    '9': 'compasión, cierre de ciclos y visión humanista',
+    '11': 'intuición elevada, inspiración y visión sensible',
+    '22': 'maestría práctica para construir impacto duradero',
+    '33': 'servicio compasivo y vocación de guía',
+  };
+  return map[key] ?? 'potencial de aprendizaje y crecimiento';
 }
 
 @Injectable()
@@ -204,9 +301,9 @@ export class PaymentsService {
         },
         auto_return: 'approved',
         back_urls: {
-          success: `${FRONTEND_BASE}/subscribe?provider=mercadopago&status=success`,
-          failure: `${FRONTEND_BASE}/subscribe?provider=mercadopago&status=failure`,
-          pending: `${FRONTEND_BASE}/subscribe?provider=mercadopago&status=pending`,
+          success: `${FRONTEND_BASE}/portal/subscription?provider=mercadopago&status=success`,
+          failure: `${FRONTEND_BASE}/portal/subscription?provider=mercadopago&status=failure`,
+          pending: `${FRONTEND_BASE}/portal/subscription?provider=mercadopago&status=pending`,
         },
       }),
     });
@@ -324,30 +421,56 @@ export class PaymentsService {
     return ['birth_chart', 'solar_return', 'numerology'];
   }
 
+  private isLegacyAutoDraft(type: ReportType, content: string | null): boolean {
+    if (!content) return true;
+    const normalized = content.toLowerCase();
+    if (type === 'birth_chart') {
+      return normalized.includes('tu carta de base') && normalized.includes('cómo usar este reporte');
+    }
+    if (type === 'solar_return') {
+      return normalized.includes('apertura de ciclo anual') && normalized.includes('integración práctica');
+    }
+    return normalized.includes('interpretación inicial') && normalized.includes('esta versión base se ampliará');
+  }
+
   private buildReportDraft(
     type: ReportType,
     user: { name?: string | null; birthDate?: string | null; birthPlace?: string | null; birthTime?: string | null },
   ): { title: string; content: string } {
     const firstName = (user.name ?? 'Cliente').trim().split(/\s+/)[0] || 'Cliente';
     const birthDate = normalizeBirthDate(user.birthDate);
+    const birthParts = parseBirthDateParts(user.birthDate);
     const birthPlace = user.birthPlace?.trim() || 'tu lugar de nacimiento';
     const birthTime = user.birthTime?.trim() || 'tu hora de nacimiento';
     const lifePath = calculateLifePathNumber(user.birthDate);
+    const sunSign = getSunSignFromBirthDate(user.birthDate);
+    const nameNumbers = mapNameCharsToNumber(user.name ?? '');
+    const birthdayNumber = birthParts ? calculateBirthdayNumber(birthParts.day) : null;
+    const attitudeNumber = birthParts ? calculateAttitudeNumber(birthParts.month, birthParts.day) : null;
+    const currentYear = new Date().getFullYear();
+    const personalYear = birthParts ? calculatePersonalYear(birthParts.month, birthParts.day, currentYear) : null;
 
     if (type === 'birth_chart') {
       return {
         title: 'Carta Natal',
         content: JSON.stringify([
           {
-            id: 'base-1',
-            title: 'Tu carta de base',
-            content: `Hola ${firstName}. Activamos tu Carta Natal con los datos de nacimiento registrados (${birthDate ?? 'fecha pendiente'}, ${birthTime}, ${birthPlace}).`,
+            id: 'datos-base',
+            title: 'Datos de nacimiento utilizados',
+            content: `Nombre: ${user.name ?? firstName}\nFecha: ${birthDate ?? 'pendiente'}\nHora: ${birthTime}\nLugar: ${birthPlace}`,
           },
           {
-            id: 'base-2',
-            title: 'Cómo usar este reporte',
+            id: 'eje-identidad',
+            title: 'Eje de identidad natal',
+            content: sunSign
+              ? `Tu Sol de nacimiento se ubica en ${sunSign}. Este eje describe tu forma natural de expresarte, decidir y orientar tu energía vital.`
+              : 'Para calcular con precisión tu eje solar necesitamos una fecha de nacimiento válida en tu perfil.',
+          },
+          {
+            id: 'guia-practica',
+            title: 'Guía práctica de lectura',
             content:
-              'Esta versión inicial te sirve como punto de partida. Desde el panel podrás recibir versiones ampliadas y personalizadas según tu proceso.',
+              'Usa esta carta como mapa base: 1) observa tus patrones repetidos, 2) cruza hallazgos con tus decisiones actuales, 3) integra tus mensajes mensuales para aterrizar acciones.',
           },
         ]),
       };
@@ -363,16 +486,22 @@ export class PaymentsService {
           },
           sections: [
             {
-              id: 'focus',
+              id: 'cycle',
               title: 'Enfoque del año',
               content:
-                'Este reporte se activa con tu suscripción y se irá enriqueciendo con contenidos de seguimiento durante el año.',
+                'La Revolución Solar marca el tono de tu ciclo anual entre cumpleaños. Este informe inicia tu seguimiento del año y se complementa con tus mensajes y preguntas del portal.',
             },
             {
-              id: 'integration',
-              title: 'Integración práctica',
+              id: 'timing',
+              title: 'Timing recomendado',
               content:
-                'Te recomendamos revisarlo junto con tus mensajes y preguntas para conectar los tránsitos con decisiones concretas.',
+                'Te sugerimos revisar este reporte al comienzo de cada mes para detectar prioridades, ajustar foco y tomar decisiones con más contexto.',
+            },
+            {
+              id: 'contexto',
+              title: 'Contexto de nacimiento aplicado',
+              content:
+                `Base registrada: ${birthDate ?? 'fecha pendiente'} - ${birthTime} - ${birthPlace}. Con estos datos podrás contrastar tu ciclo anual con tu carta natal.`,
             },
           ],
         }),
@@ -386,15 +515,83 @@ export class PaymentsService {
           {
             number: lifePath ?? '—',
             label: 'Camino de Vida',
-            desc: lifePath ? `Calculado desde tu fecha de nacimiento registrada (${birthDate}).` : 'Completa tu fecha de nacimiento para calcularlo automáticamente.',
+            desc: lifePath
+              ? `Derivado de tu fecha de nacimiento (${birthDate}).`
+              : 'Completa tu fecha de nacimiento para calcularlo automáticamente.',
+          },
+          {
+            number: birthdayNumber != null ? String(birthdayNumber) : '—',
+            label: 'Número de Nacimiento',
+            desc: birthdayNumber != null ? `Reduce el día ${birthParts?.day} a vibración esencial.` : 'Disponible cuando registres una fecha válida.',
+          },
+          {
+            number: attitudeNumber != null ? String(attitudeNumber) : '—',
+            label: 'Número de Actitud',
+            desc: attitudeNumber != null ? `Suma mes + día (${birthParts?.month} + ${birthParts?.day}).` : 'Disponible cuando registres una fecha válida.',
+          },
+          {
+            number: personalYear != null ? String(personalYear) : '—',
+            label: `Año Personal ${currentYear}`,
+            desc: personalYear != null ? 'Marca la energía del año en curso para tus decisiones.' : 'Disponible cuando registres una fecha válida.',
+          },
+          {
+            number: nameNumbers.expression != null ? String(nameNumbers.expression) : '—',
+            label: 'Número de Expresión',
+            desc: nameNumbers.expression != null ? 'Calculado con letras de tu nombre completo.' : 'Disponible cuando tengas nombre válido en tu perfil.',
+          },
+          {
+            number: nameNumbers.soulUrge != null ? String(nameNumbers.soulUrge) : '—',
+            label: 'Número del Alma',
+            desc: nameNumbers.soulUrge != null ? 'Derivado de vocales de tu nombre.' : 'Disponible cuando tengas nombre válido en tu perfil.',
+          },
+          {
+            number: nameNumbers.personality != null ? String(nameNumbers.personality) : '—',
+            label: 'Número de Personalidad',
+            desc: nameNumbers.personality != null ? 'Derivado de consonantes de tu nombre.' : 'Disponible cuando tengas nombre válido en tu perfil.',
           },
         ],
         interpretations: [
           {
-            id: 'base',
-            title: 'Interpretación inicial',
+            id: 'camino',
+            title: `Camino de Vida ${lifePath ?? '—'}`,
+            content: lifePath
+              ? `Tu Camino de Vida ${lifePath} enfatiza ${numberMeaning(lifePath)}. En la práctica, este número sugiere cómo avanzar con más coherencia personal.`
+              : 'Completa una fecha de nacimiento válida para desbloquear esta interpretación.',
+          },
+          {
+            id: 'nacimiento',
+            title: `Número de Nacimiento ${birthdayNumber ?? '—'}`,
+            content: birthdayNumber != null
+              ? `Tu número de nacimiento aporta un talento natural orientado a ${numberMeaning(birthdayNumber)}.`
+              : 'Disponible cuando registres una fecha de nacimiento válida.',
+          },
+          {
+            id: 'actitud',
+            title: `Actitud ${attitudeNumber ?? '—'}`,
+            content: attitudeNumber != null
+              ? `Este número describe tu primera impresión y enfoque espontáneo: ${numberMeaning(attitudeNumber)}.`
+              : 'Disponible cuando registres una fecha de nacimiento válida.',
+          },
+          {
+            id: 'anio',
+            title: `Año Personal ${currentYear}: ${personalYear ?? '—'}`,
+            content: personalYear != null
+              ? `Durante ${currentYear}, predomina una energía asociada a ${numberMeaning(personalYear)}. Úsala para priorizar decisiones y ritmo.`
+              : 'Disponible cuando registres una fecha de nacimiento válida.',
+          },
+          {
+            id: 'nombre',
+            title: 'Eje del Nombre (Expresión/Alma/Personalidad)',
             content:
-              'Activamos tu reporte de numerología. Esta versión base se ampliará con más capas interpretativas dentro del portal.',
+              nameNumbers.expression != null && nameNumbers.soulUrge != null && nameNumbers.personality != null
+                ? `Expresión ${nameNumbers.expression}: ${numberMeaning(nameNumbers.expression)}. Alma ${nameNumbers.soulUrge}: ${numberMeaning(nameNumbers.soulUrge)}. Personalidad ${nameNumbers.personality}: ${numberMeaning(nameNumbers.personality)}.`
+                : 'Con un nombre completo válido, este eje mostrará cómo comunicas tu potencial, tu motivación interna y tu forma de presentarte.',
+          },
+          {
+            id: 'integracion',
+            title: 'Claves de integración',
+            content:
+              'Integra tus números en acciones concretas: define 1 prioridad mensual, 1 hábito sostenible y 1 criterio de decisión alineado con tu ciclo personal.',
           },
         ],
       }),
@@ -408,17 +605,21 @@ export class PaymentsService {
 
     const existing = await this.prisma.report.findMany({
       where: { userId, type: { in: requiredTypes } },
-      select: { type: true },
+      select: { id: true, type: true, content: true, createdAt: true },
+      orderBy: { createdAt: 'desc' },
     });
-    const existingTypes = new Set(existing.map((r) => r.type));
+    const latestByType = new Map<ReportType, (typeof existing)[number]>();
+    for (const row of existing) {
+      if (!latestByType.has(row.type as ReportType)) {
+        latestByType.set(row.type as ReportType, row);
+      }
+    }
 
-    const missingTypes = requiredTypes.filter((type) => !existingTypes.has(type));
-    if (missingTypes.length === 0) return;
-
-    await Promise.all(
-      missingTypes.map((type) => {
-        const draft = this.buildReportDraft(type, user);
-        return this.prisma.report.create({
+    for (const type of requiredTypes) {
+      const latest = latestByType.get(type);
+      const draft = this.buildReportDraft(type, user);
+      if (!latest) {
+        await this.prisma.report.create({
           data: {
             userId,
             type,
@@ -426,8 +627,20 @@ export class PaymentsService {
             content: draft.content,
           },
         });
-      }),
-    );
+        continue;
+      }
+
+      // Upgrade only our old low-detail autogenerated drafts, never custom/admin reports.
+      if (this.isLegacyAutoDraft(type, latest.content)) {
+        await this.prisma.report.update({
+          where: { id: latest.id },
+          data: {
+            title: draft.title,
+            content: draft.content,
+          },
+        });
+      }
+    }
   }
 
   async confirmStripeSession(userId: string, sessionId: string) {
