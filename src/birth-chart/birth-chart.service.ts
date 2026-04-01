@@ -254,10 +254,21 @@ function parseSignFromNode(value: unknown): string | null {
   if (typeof value === 'string') return toSpanishSign(value);
   if (!value || typeof value !== 'object') return null;
   const obj = value as Record<string, unknown>;
+  const signField = obj.sign;
+  if (signField && typeof signField === 'object') {
+    const inner = signField as Record<string, unknown>;
+    const fromNested =
+      toSpanishSign(inner.abbreviation) ??
+      toSpanishSign(inner.abbr) ??
+      toSpanishSign(inner.code) ??
+      (typeof inner.name === 'string' ? toSpanishSign(inner.name) : null);
+    if (fromNested) return fromNested;
+  }
   return (
-    toSpanishSign(obj.sign) ??
+    (typeof signField === 'string' ? toSpanishSign(signField) : null) ??
     toSpanishSign(obj.sign_name) ??
     toSpanishSign(obj.zodiac_sign) ??
+    toSpanishSign(obj.sign_abbreviation) ??
     toSpanishSign(obj.rashi)
   );
 }
@@ -265,7 +276,14 @@ function parseSignFromNode(value: unknown): string | null {
 function parseDegreeFromNode(value: unknown): number | null {
   if (!value || typeof value !== 'object') return null;
   const obj = value as Record<string, unknown>;
-  const candidates = [obj.degree, obj.normDegree, obj.fullDegree, obj.norm_degree, obj.full_degree];
+  const candidates = [
+    obj.degree,
+    obj.normDegree,
+    obj.fullDegree,
+    obj.norm_degree,
+    obj.full_degree,
+    obj.degree_in_sign,
+  ];
   for (const item of candidates) {
     if (typeof item === 'number' && Number.isFinite(item)) return item;
     if (typeof item === 'string') {
@@ -291,15 +309,62 @@ function ianaTimezoneForBirth(iana: string | undefined, offsetHours: number): st
   return rounded > 0 ? `Etc/GMT-${n}` : `Etc/GMT+${n}`;
 }
 
+function looksLikePlanetaryRow(row: unknown): boolean {
+  if (!row || typeof row !== 'object' || Array.isArray(row)) return false;
+  const r = row as Record<string, unknown>;
+  return (
+    typeof r.name === 'string' ||
+    typeof r.point === 'string' ||
+    typeof r.planet === 'string' ||
+    typeof r.body === 'string' ||
+    typeof r.id === 'string' ||
+    typeof r.sign === 'string' ||
+    (r.sign !== null && typeof r.sign === 'object')
+  );
+}
+
+/** Astrology API v3 may use `positions`, `planetary_positions`, `planets`, or nest under `data`. */
+function extractPlanetaryPositionsList(raw: unknown, depth = 0): unknown[] {
+  if (depth > 8) return [];
+  if (Array.isArray(raw)) {
+    if (raw.length === 0) return [];
+    return looksLikePlanetaryRow(raw[0]) ? raw : [];
+  }
+  if (!raw || typeof raw !== 'object') return [];
+  const o = raw as Record<string, unknown>;
+  const childKeys = [
+    'positions',
+    'planets',
+    'planetary_positions',
+    'celestial_points',
+    'planetary_positions_tropical',
+    'data',
+    'result',
+    'response',
+    'items',
+  ];
+  for (const k of childKeys) {
+    const v = o[k];
+    if (v === undefined || v === null) continue;
+    const got = extractPlanetaryPositionsList(v, depth + 1);
+    if (got.length > 0) return got;
+  }
+  return [];
+}
+
 function findPlanetDataInPayload(input: unknown, planetAliases: string[]): { sign: string; degree: number | null } | null {
   const aliases = new Set(planetAliases.map((a) => normalizeKey(a)));
   const visited = new Set<unknown>();
 
   const tryObject = (obj: Record<string, unknown>): { sign: string; degree: number | null } | null => {
-    const nameCandidates = [obj.name, obj.planet, obj.object, obj.id]
+    const nameCandidates = [obj.name, obj.planet, obj.object, obj.point, obj.body, obj.label, obj.point_name, obj.id]
+      .filter((v): v is string => typeof v === 'string')
+      .map((v) => normalizeKey(v.replace(/_/g, '')));
+    const nameCandidatesUnderscore = [obj.name, obj.planet, obj.point, obj.id]
       .filter((v): v is string => typeof v === 'string')
       .map((v) => normalizeKey(v));
-    if (nameCandidates.some((n) => aliases.has(n))) {
+    const combined = new Set([...nameCandidates, ...nameCandidatesUnderscore]);
+    if ([...combined].some((n) => aliases.has(n))) {
       const sign = parseSignFromNode(obj);
       if (!sign) return null;
       return { sign, degree: parseDegreeFromNode(obj) };
@@ -334,7 +399,15 @@ function findPlanetDataInPayload(input: unknown, planetAliases: string[]): { sig
     if (direct) return direct;
 
     // Only traverse known containers to avoid matching unrelated nested sign fields.
-    const containers = [obj.data, obj.result, obj.response, obj.planets, obj.items];
+    const containers = [
+      obj.data,
+      obj.result,
+      obj.response,
+      obj.planets,
+      obj.positions,
+      obj.planetary_positions,
+      obj.items,
+    ];
     for (const container of containers) {
       const found = scan(container);
       if (found) return found;
@@ -546,10 +619,16 @@ export class BirthChartService {
     try {
       const [svg, positionsRes] = await Promise.all([
         client.svg.getNatalChartSvg({ subject }),
-        client.data.getPositions({ subject }),
+        client.data.getPositions({
+          subject,
+          options: {
+            zodiac_type: 'Tropic',
+            active_points: ['Sun', 'Moon', 'Ascendant'],
+          },
+        }),
       ]);
       svgMarkup = svg;
-      positionsPayload = { planets: positionsRes.positions ?? [] };
+      positionsPayload = { planets: extractPlanetaryPositionsList(positionsRes) };
     } catch (err) {
       const astroErr = AstrologyError.normalize(err);
       throw new BadRequestException(astroErr.message || 'Error del proveedor astrológico (Astrology API).');
@@ -565,7 +644,7 @@ export class BirthChartService {
 
     const sunData = findPlanetDataInPayload(positionsPayload, ['sun', 'sol']);
     const moonData = findPlanetDataInPayload(positionsPayload, ['moon', 'luna']);
-    const ascData = findPlanetDataInPayload(positionsPayload, ['ascendant', 'asc', 'lagna']);
+    const ascData = findPlanetDataInPayload(positionsPayload, ['ascendant', 'asc', 'lagna', 'rising']);
     if (!sunData || !moonData || !ascData) {
       throw new BadRequestException(
         `No se pudieron resolver Sol/Luna/Ascendente desde posiciones planetarias. Formato recibido: ${describePayloadShape(positionsPayload, JSON.stringify(positionsPayload).slice(0, 200))}`,
