@@ -1,9 +1,15 @@
-import { BadRequestException, ForbiddenException, Injectable, UnauthorizedException } from '@nestjs/common';
-import Stripe from 'stripe';
+import { createHmac, randomUUID, timingSafeEqual } from 'crypto';
+import {
+  BadRequestException,
+  ForbiddenException,
+  Injectable,
+  Logger,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { UsersService } from '../users/users.service';
 
-type Provider = 'stripe' | 'mercadopago' | 'paypal';
+type Provider = 'mercadopago' | 'paypal';
 type Billing = 'monthly' | 'annual';
 type Plan = 'essentials' | 'portal' | 'depth';
 type ExtraType = 'extra_question' | 'private_session';
@@ -13,21 +19,16 @@ export interface CheckoutResult {
   provider: Provider;
   checkoutUrl: string;
   reference: string;
-  mode?: 'custom';
-  stripeClientSecret?: string;
-  stripePublishableKey?: string;
-  stripePaymentIntentId?: string;
 }
 
 interface SubscriptionCheckoutInput {
   provider: Provider;
   plan: Plan;
   billing: Billing;
-  embedded?: boolean;
 }
 
 interface ExtraCheckoutInput {
-  provider: Provider;
+  provider: 'mercadopago';
   extraType: ExtraType;
   quantity?: number;
 }
@@ -214,6 +215,8 @@ function numberMeaning(n: string | number): string {
 
 @Injectable()
 export class PaymentsService {
+  private readonly logger = new Logger(PaymentsService.name);
+
   constructor(
     private prisma: PrismaService,
     private usersService: UsersService,
@@ -224,12 +227,6 @@ export class PaymentsService {
     if (!user) throw new UnauthorizedException('User not found');
     if (user.role !== 'client') throw new ForbiddenException('Payments are for client users only');
     return user;
-  }
-
-  private getStripeClient(): Stripe {
-    const secret = process.env.STRIPE_SECRET_KEY;
-    if (!secret) throw new BadRequestException('Missing STRIPE_SECRET_KEY');
-    return new Stripe(secret);
   }
 
   private getMercadoPagoToken(): string {
@@ -276,39 +273,11 @@ export class PaymentsService {
     const config = SUBSCRIPTION_CATALOG[input.plan];
     if (!config) throw new BadRequestException('Invalid plan');
 
-    if (input.provider === 'stripe') {
-      if (!process.env.STRIPE_SECRET_KEY) throw new BadRequestException('Missing STRIPE_SECRET_KEY');
-      const stripe = this.getStripeClient();
-      const amount = config.usd[input.billing];
-      const publishableKey = process.env.STRIPE_PUBLISHABLE_KEY;
-      if (!publishableKey) throw new BadRequestException('Missing STRIPE_PUBLISHABLE_KEY');
-      const paymentIntent = await stripe.paymentIntents.create({
-        amount: Math.round(amount * 100),
-        currency: 'usd',
-        automatic_payment_methods: { enabled: true },
-        receipt_email: user.email,
-        metadata: {
-          userId,
-          paymentKind: 'subscription',
-          plan: input.plan,
-          billing: input.billing,
-        },
-      });
-
-      if (!paymentIntent.client_secret) {
-        throw new BadRequestException('Stripe payment intent client secret not available');
-      }
-
-      return {
-        provider: 'stripe',
-        checkoutUrl: '',
-        reference: paymentIntent.id,
-        mode: 'custom',
-        stripeClientSecret: paymentIntent.client_secret,
-        stripePublishableKey: publishableKey,
-        stripePaymentIntentId: paymentIntent.id ?? undefined,
-      };
+    if (input.provider === 'paypal') {
+      return this.createPayPalSubscriptionOrder(user, input.plan, input.billing);
     }
+
+    if (input.provider !== 'mercadopago') throw new BadRequestException('Invalid provider');
 
     if (!process.env.MERCADOPAGO_ACCESS_TOKEN) throw new BadRequestException('Missing MERCADOPAGO_ACCESS_TOKEN');
     const accessToken = this.getMercadoPagoToken();
@@ -362,38 +331,10 @@ export class PaymentsService {
 
   async createExtraCheckout(userId: string, input: ExtraCheckoutInput): Promise<CheckoutResult> {
     await this.requireClient(userId);
+    if (input.provider !== 'mercadopago') throw new BadRequestException('Invalid provider');
     const extra = EXTRAS_CATALOG[input.extraType];
     if (!extra) throw new BadRequestException('Invalid extraType');
     const quantity = Math.max(1, Math.min(10, Number(input.quantity ?? 1)));
-
-    if (input.provider === 'stripe') {
-      const stripe = this.getStripeClient();
-      const publishableKey = process.env.STRIPE_PUBLISHABLE_KEY;
-      if (!publishableKey) throw new BadRequestException('Missing STRIPE_PUBLISHABLE_KEY');
-      const paymentIntent = await stripe.paymentIntents.create({
-        amount: Math.round(extra.usd * 100) * quantity,
-        currency: 'usd',
-        automatic_payment_methods: { enabled: true },
-        metadata: {
-          userId,
-          paymentKind: 'extra',
-          extraType: input.extraType,
-          quantity: String(quantity),
-        },
-      });
-      if (!paymentIntent.client_secret) {
-        throw new BadRequestException('Stripe payment intent client secret not available');
-      }
-      return {
-        provider: 'stripe',
-        checkoutUrl: '',
-        reference: paymentIntent.id,
-        mode: 'custom',
-        stripeClientSecret: paymentIntent.client_secret,
-        stripePublishableKey: publishableKey,
-        stripePaymentIntentId: paymentIntent.id,
-      };
-    }
 
     const accessToken = this.getMercadoPagoToken();
     const externalReference = encodeExternalReference({
@@ -503,6 +444,74 @@ export class PaymentsService {
     return { provider: 'paypal', checkoutUrl: approve.href, reference: body.id };
   }
 
+  private async createPayPalSubscriptionOrder(
+    user: { id: string; email: string; name: string },
+    plan: Plan,
+    billing: Billing,
+  ): Promise<CheckoutResult> {
+    const config = SUBSCRIPTION_CATALOG[plan];
+    const amount = config.usd[billing];
+    const valueStr = amount.toFixed(2);
+    const label = billing === 'monthly' ? 'Mensual' : 'Anual';
+    const itemName = `${config.title} (${label})`.slice(0, 127);
+    const referenceId = `subscription:${plan}:${billing}`;
+
+    const token = await this.getPayPalAccessToken();
+    const base = this.getPayPalApiBase();
+    const res = await fetch(`${base}/v2/checkout/orders`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        intent: 'CAPTURE',
+        purchase_units: [
+          {
+            reference_id: referenceId,
+            custom_id: user.id,
+            description: itemName,
+            amount: {
+              currency_code: 'USD',
+              value: valueStr,
+              breakdown: {
+                item_total: { currency_code: 'USD', value: valueStr },
+              },
+            },
+            items: [
+              {
+                name: itemName,
+                unit_amount: { currency_code: 'USD', value: valueStr },
+                quantity: '1',
+                category: 'DIGITAL_GOODS',
+              },
+            ],
+          },
+        ],
+        application_context: {
+          brand_name: 'Astar',
+          landing_page: 'NO_PREFERENCE',
+          user_action: 'PAY_NOW',
+          return_url: `${FRONTEND_BASE}/portal/subscription?provider=paypal&status=success`,
+          cancel_url: `${FRONTEND_BASE}/portal/subscription?provider=paypal&status=cancelled`,
+        },
+      }),
+    });
+    const body = (await res.json().catch(() => ({}))) as {
+      id?: string;
+      links?: { href: string; rel: string; method?: string }[];
+      message?: string;
+    };
+    if (!res.ok || !body.id) {
+      throw new BadRequestException(typeof body.message === 'string' ? body.message : 'Failed to create PayPal order');
+    }
+    const approve = body.links?.find((l) => l.rel === 'approve' && l.method === 'GET');
+    if (!approve?.href) {
+      throw new BadRequestException('PayPal approval URL missing');
+    }
+    return { provider: 'paypal', checkoutUrl: approve.href, reference: body.id };
+  }
+
   async createExtrasCartCheckout(userId: string, input: { provider: 'mercadopago' | 'paypal' }): Promise<CheckoutResult> {
     const user = await this.requireClient(userId);
     const row = await this.prisma.user.findUnique({
@@ -592,7 +601,7 @@ export class PaymentsService {
     const existing = (await getRes.json().catch(() => ({}))) as {
       id?: string;
       status?: string;
-      purchase_units?: Array<{ custom_id?: string }>;
+      purchase_units?: Array<{ custom_id?: string; reference_id?: string }>;
     };
     if (!getRes.ok) throw new BadRequestException('Invalid PayPal order');
     const customId = existing.purchase_units?.[0]?.custom_id;
@@ -601,6 +610,7 @@ export class PaymentsService {
     type CapShape = {
       status?: string;
       purchase_units?: Array<{
+        reference_id?: string;
         payments?: { captures?: Array<{ amount?: { currency_code?: string; value?: string } }> };
         amount?: { currency_code?: string; value?: string };
       }>;
@@ -630,26 +640,56 @@ export class PaymentsService {
     const capture = pu0?.payments?.captures?.[0];
     const amountVal = capture?.amount?.value ?? pu0?.amount?.value ?? '0';
     const currency = capture?.amount?.currency_code ?? pu0?.amount?.currency_code ?? 'USD';
+    const referenceId = pu0?.reference_id ?? '';
 
-    const snapshot = await this.prisma.user.findUnique({
-      where: { id: userId },
-      select: { extrasCartServiceIds: true },
-    });
-    const type = `extras_cart:${(snapshot?.extrasCartServiceIds ?? []).join('|') || 'paid'}`;
+    if (referenceId.startsWith('subscription:')) {
+      const parts = referenceId.split(':');
+      if (parts.length !== 3) throw new BadRequestException('Invalid PayPal subscription order');
+      const plan = parts[1] as Plan;
+      const billing = parts[2] as Billing;
+      if (!SUBSCRIPTION_CATALOG[plan] || (billing !== 'monthly' && billing !== 'annual')) {
+        throw new BadRequestException('Invalid subscription metadata on PayPal order');
+      }
+      const type = `subscription:${plan}:${billing}`;
+      await this.createOrderIfMissing({
+        userId,
+        type,
+        amount: `${amountVal} ${currency}`,
+        method: `paypal:${orderId}`,
+      });
+      await this.usersService.updateSubscription(userId, 'active');
+      await this.ensureSubscriptionReports(userId, plan);
+      return {
+        ok: true,
+        provider: 'paypal' as const,
+        paymentKind: 'subscription' as const,
+        subscriptionStatus: 'active' as const,
+      };
+    }
 
-    await this.createOrderIfMissing({
-      userId,
-      type,
-      amount: `${amountVal} ${currency}`,
-      method: `paypal:${orderId}`,
-    });
-    await this.clearExtrasCart(userId);
+    if (referenceId === 'extras_cart') {
+      const snapshot = await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { extrasCartServiceIds: true },
+      });
+      const type = `extras_cart:${(snapshot?.extrasCartServiceIds ?? []).join('|') || 'paid'}`;
 
-    return {
-      ok: true,
-      provider: 'paypal' as const,
-      paymentKind: 'extras_cart' as const,
-    };
+      await this.createOrderIfMissing({
+        userId,
+        type,
+        amount: `${amountVal} ${currency}`,
+        method: `paypal:${orderId}`,
+      });
+      await this.clearExtrasCart(userId);
+
+      return {
+        ok: true,
+        provider: 'paypal' as const,
+        paymentKind: 'extras_cart' as const,
+      };
+    }
+
+    throw new BadRequestException('Unknown PayPal order type');
   }
 
   private async createOrderIfMissing(params: {
@@ -898,112 +938,18 @@ export class PaymentsService {
     }
   }
 
-  async confirmStripeSession(userId: string, sessionId: string) {
-    await this.requireClient(userId);
-    if (!sessionId?.trim()) throw new BadRequestException('sessionId is required');
-
-    const stripe = this.getStripeClient();
-    const session = await stripe.checkout.sessions.retrieve(sessionId);
-
-    if (session.client_reference_id !== userId) {
-      throw new ForbiddenException('Session does not belong to user');
-    }
-    if (session.status !== 'complete') {
-      throw new BadRequestException('Stripe payment is not completed');
-    }
-
-    const metadata = session.metadata ?? {};
-    const paymentKind = metadata.paymentKind as 'subscription' | 'extra' | undefined;
-    if (!paymentKind) throw new BadRequestException('Missing payment metadata');
-
-    const amount = ((session.amount_total ?? 0) / 100).toFixed(2);
-    const currency = (session.currency ?? 'usd').toUpperCase();
-    const method = `stripe:${session.id}`;
-    const type =
-      paymentKind === 'subscription'
-        ? `subscription:${metadata.plan ?? 'portal'}:${metadata.billing ?? 'monthly'}`
-        : `extra:${metadata.extraType ?? 'extra_question'}:${metadata.quantity ?? '1'}`;
-
-    await this.createOrderIfMissing({
-      userId,
-      type,
-      amount: `${amount} ${currency}`,
-      method,
-    });
-
-    if (paymentKind === 'subscription') {
-      await this.usersService.updateSubscription(userId, 'active');
-      await this.ensureSubscriptionReports(userId, metadata.plan);
-    }
-
-    return {
-      ok: true,
-      provider: 'stripe' as const,
-      paymentKind,
-      subscriptionStatus: paymentKind === 'subscription' ? 'active' : undefined,
-    };
-  }
-
-  async confirmStripePaymentIntent(userId: string, paymentIntentId: string) {
-    await this.requireClient(userId);
-    if (!paymentIntentId?.trim()) throw new BadRequestException('paymentIntentId is required');
-
-    const stripe = this.getStripeClient();
-    const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
-    const metadata = paymentIntent.metadata ?? {};
-    if (metadata.userId !== userId) {
-      throw new ForbiddenException('Payment intent does not belong to user');
-    }
-    if (paymentIntent.status !== 'succeeded') {
-      throw new BadRequestException('Stripe payment is not completed');
-    }
-
-    const paymentKind = (metadata.paymentKind as 'subscription' | 'extra' | undefined) ?? 'subscription';
-    const type =
-      paymentKind === 'subscription'
-        ? `subscription:${metadata.plan ?? 'portal'}:${metadata.billing ?? 'monthly'}`
-        : `extra:${metadata.extraType ?? 'extra_question'}:${metadata.quantity ?? '1'}`;
-    await this.createOrderIfMissing({
-      userId,
-      type,
-      amount: `${((paymentIntent.amount ?? 0) / 100).toFixed(2)} ${(paymentIntent.currency ?? 'USD').toUpperCase()}`,
-      method: `stripe_intent:${paymentIntent.id}`,
-    });
-    if (paymentKind === 'subscription') {
-      await this.usersService.updateSubscription(userId, 'active');
-      await this.ensureSubscriptionReports(userId, metadata.plan);
-    }
-
-    return {
-      ok: true,
-      provider: 'stripe' as const,
-      paymentKind: paymentKind as 'subscription' | 'extra',
-      subscriptionStatus: paymentKind === 'subscription' ? ('active' as const) : undefined,
-    };
-  }
-
-  async confirmMercadoPagoPayment(userId: string, paymentId: string) {
-    await this.requireClient(userId);
-    if (!paymentId?.trim()) throw new BadRequestException('paymentId is required');
-
-    const accessToken = this.getMercadoPagoToken();
-    const res = await fetch(`https://api.mercadopago.com/v1/payments/${encodeURIComponent(paymentId)}`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    const body = (await res.json().catch(() => ({}))) as {
-      status?: string;
-      transaction_amount?: number;
-      currency_id?: string;
-      external_reference?: string;
-      metadata?: Record<string, string>;
-      message?: string;
-    };
-
-    if (!res.ok) throw new BadRequestException(body.message ?? 'Failed to validate Mercado Pago payment');
-    if (body.status !== 'approved') throw new BadRequestException('Mercado Pago payment is not approved');
-
-    const refData = decodeExternalReference(body.external_reference);
-    const metadata = body.metadata ?? {};
+  private async fulfillMercadoPagoApprovedPayment(
+    userId: string,
+    params: {
+      paymentId: string;
+      transactionAmount: number;
+      currencyId: string;
+      externalReference: string;
+      metadata: Record<string, string | undefined>;
+    },
+  ) {
+    const refData = decodeExternalReference(params.externalReference);
+    const metadata = params.metadata ?? {};
     const ownerUserId = metadata.userId ?? refData.userId;
     if (ownerUserId !== userId) throw new ForbiddenException('Payment does not belong to user');
 
@@ -1014,8 +960,8 @@ export class PaymentsService {
       | undefined;
     if (!paymentKind) throw new BadRequestException('Missing payment metadata');
 
-    const method = `mercadopago:${paymentId}`;
-    const amount = `${(body.transaction_amount ?? 0).toFixed(2)} ${(body.currency_id ?? 'ARS').toUpperCase()}`;
+    const method = `mercadopago:${params.paymentId}`;
+    const amount = `${params.transactionAmount.toFixed(2)} ${(params.currencyId ?? 'ARS').toUpperCase()}`;
     const type =
       paymentKind === 'subscription'
         ? `subscription:${metadata.plan ?? refData.plan ?? 'portal'}:${metadata.billing ?? refData.billing ?? 'monthly'}`
@@ -1040,17 +986,389 @@ export class PaymentsService {
     }
 
     return {
-      ok: true,
+      ok: true as const,
       provider: 'mercadopago' as const,
       paymentKind,
-      subscriptionStatus: paymentKind === 'subscription' ? 'active' : undefined,
+      subscriptionStatus: paymentKind === 'subscription' ? ('active' as const) : undefined,
     };
+  }
+
+  async processMercadoPagoCardPayment(
+    userId: string,
+    input: {
+      flow: 'subscription' | 'extras_cart';
+      plan?: Plan;
+      billing?: Billing;
+      token: string;
+      issuerId?: string;
+      paymentMethodId: string;
+      installments: number;
+      transactionAmount: number;
+      payerEmail: string;
+      payerIdentification?: { type: string; number: string };
+    },
+  ) {
+    const user = await this.requireClient(userId);
+    const accessToken = this.getMercadoPagoToken();
+
+    let expectedAmount: number;
+    let description: string;
+    let externalReference: string;
+    const metadata: Record<string, string> = {
+      userId,
+      provider: 'mercadopago',
+    };
+
+    if (input.flow === 'subscription') {
+      if (!input.plan || !input.billing) throw new BadRequestException('plan and billing are required');
+      const config = SUBSCRIPTION_CATALOG[input.plan];
+      if (!config) throw new BadRequestException('Invalid plan');
+      expectedAmount = config.ars[input.billing];
+      description = `${config.title} (${input.billing === 'monthly' ? 'Mensual' : 'Anual'})`;
+      externalReference = encodeExternalReference({
+        userId,
+        paymentKind: 'subscription',
+        plan: input.plan,
+        billing: input.billing,
+        provider: 'mercadopago',
+      });
+      metadata.paymentKind = 'subscription';
+      metadata.plan = input.plan;
+      metadata.billing = input.billing;
+    } else {
+      metadata.paymentKind = 'extras_cart';
+      const row = await this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { extrasCartServiceIds: true },
+      });
+      const ids = row?.extrasCartServiceIds ?? [];
+      if (ids.length === 0) throw new BadRequestException('Tu carrito está vacío');
+      const isSub = user.subscriptionStatus === 'active';
+      const lines: { title: string; ars: number }[] = [];
+      let totalArs = 0;
+      for (const id of ids) {
+        const p = PORTAL_EXTRA_SERVICES[id];
+        if (!p) throw new BadRequestException('Carrito inválido');
+        const usd = isSub ? p.usdSub : p.usdGuest;
+        const ars = Math.round(usd * 1450);
+        lines.push({ title: p.title, ars });
+        totalArs += ars;
+      }
+      expectedAmount = totalArs;
+      description = lines.length === 1 ? lines[0].title : `Servicios extras (${lines.length} ítems)`;
+      const serviceIdsCsv = ids.join(',');
+      externalReference = encodeExternalReference({
+        userId,
+        paymentKind: 'extras_cart',
+        serviceIds: serviceIdsCsv,
+        provider: 'mercadopago',
+      });
+      metadata.serviceIds = serviceIdsCsv;
+    }
+
+    if (!Number.isFinite(input.transactionAmount) || Math.abs(input.transactionAmount - expectedAmount) > 0.01) {
+      throw new BadRequestException('El monto del pago no coincide con el total.');
+    }
+
+    const installments = Math.max(1, Math.min(Math.floor(Number(input.installments) || 1), 18));
+    if (!input.token?.trim()) throw new BadRequestException('Token de tarjeta inválido');
+    if (!input.paymentMethodId?.trim()) throw new BadRequestException('Medio de pago inválido');
+
+    const payer: Record<string, unknown> = {
+      email: input.payerEmail.trim().toLowerCase(),
+    };
+    if (input.payerIdentification?.type?.trim() && input.payerIdentification?.number?.trim()) {
+      payer.identification = {
+        type: input.payerIdentification.type.trim(),
+        number: input.payerIdentification.number.replace(/\s/g, ''),
+      };
+    }
+
+    const paymentPayload: Record<string, unknown> = {
+      transaction_amount: expectedAmount,
+      token: input.token.trim(),
+      description: description.length > 250 ? `${description.slice(0, 247)}…` : description,
+      installments,
+      payment_method_id: input.paymentMethodId.trim(),
+      payer,
+      external_reference: externalReference,
+      metadata,
+      binary_mode: true,
+      statement_descriptor: 'ASTAR',
+    };
+
+    const issuerRaw = input.issuerId?.trim();
+    if (issuerRaw && issuerRaw !== '0') {
+      const issuerNum = Number(issuerRaw);
+      if (Number.isFinite(issuerNum)) paymentPayload.issuer_id = issuerNum;
+    }
+
+    const res = await fetch('https://api.mercadopago.com/v1/payments', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+        'X-Idempotency-Key': randomUUID(),
+      },
+      body: JSON.stringify(paymentPayload),
+    });
+
+    const payBody = (await res.json().catch(() => ({}))) as {
+      id?: number;
+      status?: string;
+      status_detail?: string;
+      message?: string;
+      cause?: Array<{ description?: string }>;
+      transaction_amount?: number;
+      currency_id?: string;
+    };
+
+    if (!res.ok) {
+      const fromCause = payBody.cause?.map((c) => c.description).filter(Boolean).join(' ') ?? '';
+      throw new BadRequestException(fromCause || payBody.message || 'Mercado Pago rechazó el pago');
+    }
+
+    if (payBody.status !== 'approved') {
+      const detail = payBody.status_detail ?? 'El pago no fue aprobado.';
+      const human =
+        payBody.status_detail === 'cc_rejected_insufficient_amount' ? 'Fondos insuficientes.' : detail;
+      throw new BadRequestException(human);
+    }
+
+    const paidAmount = payBody.transaction_amount ?? expectedAmount;
+    const currency = payBody.currency_id ?? 'ARS';
+    if (Math.abs(paidAmount - expectedAmount) > 0.01) {
+      throw new BadRequestException('El monto acreditado no coincide.');
+    }
+
+    const paymentIdStr = String(payBody.id ?? '');
+    if (!paymentIdStr) throw new BadRequestException('Respuesta inválida de Mercado Pago');
+
+    const result = await this.fulfillMercadoPagoApprovedPayment(userId, {
+      paymentId: paymentIdStr,
+      transactionAmount: paidAmount,
+      currencyId: currency,
+      externalReference,
+      metadata,
+    });
+
+    return { ...result, paymentId: paymentIdStr };
+  }
+
+  async confirmMercadoPagoPayment(userId: string, paymentId: string) {
+    await this.requireClient(userId);
+    if (!paymentId?.trim()) throw new BadRequestException('paymentId is required');
+
+    const accessToken = this.getMercadoPagoToken();
+    const res = await fetch(`https://api.mercadopago.com/v1/payments/${encodeURIComponent(paymentId)}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    const body = (await res.json().catch(() => ({}))) as {
+      id?: number;
+      status?: string;
+      transaction_amount?: number;
+      currency_id?: string;
+      external_reference?: string;
+      metadata?: Record<string, string>;
+      message?: string;
+    };
+
+    if (!res.ok) throw new BadRequestException(body.message ?? 'Failed to validate Mercado Pago payment');
+    if (body.status !== 'approved') throw new BadRequestException('Mercado Pago payment is not approved');
+
+    return this.fulfillMercadoPagoApprovedPayment(userId, {
+      paymentId: String(body.id ?? paymentId),
+      transactionAmount: body.transaction_amount ?? 0,
+      currencyId: body.currency_id ?? 'ARS',
+      externalReference: body.external_reference ?? '',
+      metadata: body.metadata ?? {},
+    });
   }
 
   async cancelSubscription(userId: string) {
     await this.requireClient(userId);
     await this.usersService.updateSubscription(userId, 'cancelled');
     return { ok: true, subscriptionStatus: 'cancelled' as const };
+  }
+
+  /**
+   * Mercado Pago webhooks / IPN: fetch payment by id and fulfill if approved (idempotent).
+   * Configure URL in MP dashboard: POST (and optionally GET for legacy IPN) → /payments/webhooks/mercadopago
+   */
+  async handleMercadoPagoWebhook(input: {
+    method: 'GET' | 'POST';
+    headers: Record<string, string | string[] | undefined>;
+    body: unknown;
+    query: Record<string, string | undefined>;
+  }): Promise<{ received: true; processed: boolean; detail?: string }> {
+    const paymentId = this.extractMercadoPagoWebhookPaymentId(input.body, input.query);
+    if (!paymentId) {
+      return { received: true, processed: false, detail: 'no_payment_id' };
+    }
+
+    const secret = process.env.MERCADOPAGO_WEBHOOK_SECRET?.trim();
+    if (secret) {
+      const hasSig =
+        Boolean(this.getHeader(input.headers, 'x-signature')) &&
+        Boolean(this.getHeader(input.headers, 'x-request-id'));
+      if (hasSig) {
+        const ok = this.verifyMercadoPagoWebhookSignature(input.headers, paymentId, secret);
+        if (!ok) {
+          this.logger.warn(`Mercado Pago webhook signature check failed for payment ${paymentId}`);
+          throw new UnauthorizedException('Invalid webhook signature');
+        }
+      } else if (input.method === 'POST') {
+        this.logger.warn(`Mercado Pago POST webhook missing x-signature / x-request-id for payment ${paymentId}`);
+        throw new UnauthorizedException('Missing webhook signature');
+      } else {
+        this.logger.warn(
+          `Mercado Pago GET notification for payment ${paymentId} without signature (legacy IPN). Prefer POST webhooks.`,
+        );
+      }
+    } else {
+      this.logger.warn(
+        'MERCADOPAGO_WEBHOOK_SECRET is not set; webhook signatures are not verified (set it in production).',
+      );
+    }
+
+    let accessToken: string;
+    try {
+      accessToken = this.getMercadoPagoToken();
+    } catch {
+      this.logger.error('MERCADOPAGO_ACCESS_TOKEN missing; cannot process webhook');
+      return { received: true, processed: false, detail: 'missing_access_token' };
+    }
+
+    const res = await fetch(`https://api.mercadopago.com/v1/payments/${encodeURIComponent(paymentId)}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    const pay = (await res.json().catch(() => ({}))) as {
+      id?: number;
+      status?: string;
+      transaction_amount?: number;
+      currency_id?: string;
+      external_reference?: string;
+      metadata?: Record<string, unknown>;
+      message?: string;
+    };
+
+    if (!res.ok) {
+      this.logger.warn(`Mercado Pago GET payment ${paymentId} failed: ${pay.message ?? res.status}`);
+      return { received: true, processed: false, detail: 'fetch_failed' };
+    }
+
+    if (pay.status !== 'approved') {
+      return { received: true, processed: false, detail: `status_${pay.status ?? 'unknown'}` };
+    }
+
+    const metadata = this.normalizeMercadoPagoMetadata(pay.metadata);
+    const externalReference = pay.external_reference ?? '';
+    const refData = decodeExternalReference(externalReference);
+    const userId = metadata.userId ?? refData.userId;
+    if (!userId?.trim()) {
+      this.logger.warn(`Mercado Pago payment ${paymentId} approved but no userId in metadata/reference`);
+      return { received: true, processed: false, detail: 'no_user_id' };
+    }
+
+    try {
+      await this.fulfillMercadoPagoApprovedPayment(userId.trim(), {
+        paymentId: String(pay.id ?? paymentId),
+        transactionAmount: pay.transaction_amount ?? 0,
+        currencyId: pay.currency_id ?? 'ARS',
+        externalReference,
+        metadata,
+      });
+      this.logger.log(`Mercado Pago webhook fulfilled payment ${paymentId} for user ${userId}`);
+      return { received: true, processed: true };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.logger.error(`Mercado Pago webhook fulfill failed for ${paymentId}: ${msg}`);
+      return { received: true, processed: false, detail: 'fulfill_error' };
+    }
+  }
+
+  private extractMercadoPagoWebhookPaymentId(
+    body: unknown,
+    query: Record<string, string | undefined>,
+  ): string | null {
+    if (body && typeof body === 'object' && !Array.isArray(body)) {
+      const o = body as Record<string, unknown>;
+      const bodyType = typeof o.type === 'string' ? o.type.toLowerCase() : '';
+      if (bodyType && bodyType !== 'payment') {
+        return null;
+      }
+      const data = o.data;
+      if (data && typeof data === 'object' && !Array.isArray(data)) {
+        const id = (data as Record<string, unknown>).id;
+        if (id != null) {
+          const s = String(id).trim();
+          if (s) return s;
+        }
+      }
+    }
+
+    const topic = (query.topic ?? '').toLowerCase();
+    const qId = query.id ?? query['data.id'];
+    if (qId?.trim() && (topic === 'payment' || topic === 'payment_notification' || topic === '')) {
+      return qId.trim();
+    }
+    return null;
+  }
+
+  private normalizeMercadoPagoMetadata(raw: Record<string, unknown> | undefined): Record<string, string | undefined> {
+    const out: Record<string, string | undefined> = {};
+    if (!raw || typeof raw !== 'object') return out;
+    for (const [k, v] of Object.entries(raw)) {
+      out[k] = v == null ? undefined : String(v);
+    }
+    return out;
+  }
+
+  /**
+   * @see https://www.mercadopago.com/developers/en/docs/your-integrations/notifications/webhooks
+   */
+  private verifyMercadoPagoWebhookSignature(
+    headers: Record<string, string | string[] | undefined>,
+    dataId: string,
+    secret: string,
+  ): boolean {
+    const signatureHeader = this.getHeader(headers, 'x-signature');
+    const requestId = this.getHeader(headers, 'x-request-id');
+    if (!signatureHeader || !requestId) return false;
+
+    let ts = '';
+    let v1 = '';
+    for (const part of signatureHeader.split(',')) {
+      const idx = part.indexOf('=');
+      if (idx === -1) continue;
+      const key = part.slice(0, idx).trim();
+      const value = part.slice(idx + 1).trim();
+      if (key === 'ts') ts = value;
+      if (key === 'v1') v1 = value;
+    }
+    if (!ts || !v1) return false;
+
+    const manifest = `id:${dataId};request-id:${requestId};ts:${ts};`;
+    const expected = createHmac('sha256', secret).update(manifest).digest('hex');
+
+    try {
+      const a = Buffer.from(expected, 'utf8');
+      const b = Buffer.from(v1, 'utf8');
+      if (a.length !== b.length) return false;
+      return timingSafeEqual(a, b);
+    } catch {
+      return false;
+    }
+  }
+
+  private getHeader(headers: Record<string, string | string[] | undefined>, name: string): string | undefined {
+    const lower = name.toLowerCase();
+    for (const [k, v] of Object.entries(headers)) {
+      if (k.toLowerCase() !== lower) continue;
+      if (Array.isArray(v)) return v[0];
+      return v;
+    }
+    return undefined;
   }
 }
 

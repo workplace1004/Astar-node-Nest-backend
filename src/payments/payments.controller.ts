@@ -11,7 +11,7 @@ export class PaymentsController {
   @Post('subscription/checkout')
   async createSubscriptionCheckout(
     @CurrentUser() user: { id: string },
-    @Body() body: { provider: 'stripe' | 'mercadopago'; plan: 'essentials' | 'portal' | 'depth'; billing: 'monthly' | 'annual'; embedded?: boolean },
+    @Body() body: { provider: 'mercadopago' | 'paypal'; plan: 'essentials' | 'portal' | 'depth'; billing: 'monthly' | 'annual' },
   ) {
     return this.paymentsService.createSubscriptionCheckout(user.id, body);
   }
@@ -19,7 +19,7 @@ export class PaymentsController {
   @Post('extra/checkout')
   async createExtraCheckout(
     @CurrentUser() user: { id: string },
-    @Body() body: { provider: 'stripe' | 'mercadopago'; extraType: 'extra_question' | 'private_session'; quantity?: number },
+    @Body() body: { provider: 'mercadopago'; extraType: 'extra_question' | 'private_session'; quantity?: number },
   ) {
     return this.paymentsService.createExtraCheckout(user.id, body);
   }
@@ -32,20 +32,35 @@ export class PaymentsController {
     return this.paymentsService.createExtrasCartCheckout(user.id, body);
   }
 
-  @Post('confirm/stripe')
-  async confirmStripeSession(
+  @Post('mercadopago/card')
+  async processMercadoPagoCard(
     @CurrentUser() user: { id: string },
-    @Body() body: { sessionId: string },
+    @Body()
+    body: {
+      flow: 'subscription' | 'extras_cart';
+      plan?: 'essentials' | 'portal' | 'depth';
+      billing?: 'monthly' | 'annual';
+      token: string;
+      issuerId?: string;
+      paymentMethodId: string;
+      installments: number;
+      transactionAmount: number;
+      payerEmail: string;
+      payerIdentification?: { type: string; number: string };
+    },
   ) {
-    return this.paymentsService.confirmStripeSession(user.id, body.sessionId?.trim());
-  }
-
-  @Post('confirm/stripe-intent')
-  async confirmStripePaymentIntent(
-    @CurrentUser() user: { id: string },
-    @Body() body: { paymentIntentId: string },
-  ) {
-    return this.paymentsService.confirmStripePaymentIntent(user.id, body.paymentIntentId?.trim());
+    return this.paymentsService.processMercadoPagoCardPayment(user.id, {
+      flow: body.flow,
+      plan: body.plan,
+      billing: body.billing,
+      token: body.token?.trim() ?? '',
+      issuerId: body.issuerId,
+      paymentMethodId: body.paymentMethodId?.trim() ?? '',
+      installments: body.installments,
+      transactionAmount: body.transactionAmount,
+      payerEmail: body.payerEmail?.trim() ?? '',
+      payerIdentification: body.payerIdentification,
+    });
   }
 
   @Post('confirm/mercadopago')
