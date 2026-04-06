@@ -30,6 +30,8 @@ model User {
   birthPlace         String?            @map("birth_place")
   birthTime          String?            @map("birth_time")
   avatarUrl          String?            @map("avatar_url")
+  extrasFavoriteServiceIds String[]     @default([]) @map("extras_favorite_service_ids")
+  extrasCartServiceIds     String[]     @default([]) @map("extras_cart_service_ids")
   createdAt          DateTime           @default(now()) @map("created_at")
   updatedAt          DateTime           @updatedAt @map("updated_at")
   reports            Report[]

@@ -3,7 +3,7 @@ import Stripe from 'stripe';
 import { PrismaService } from '../prisma/prisma.service';
 import { UsersService } from '../users/users.service';
 
-type Provider = 'stripe' | 'mercadopago';
+type Provider = 'stripe' | 'mercadopago' | 'paypal';
 type Billing = 'monthly' | 'annual';
 type Plan = 'essentials' | 'portal' | 'depth';
 type ExtraType = 'extra_question' | 'private_session';
@@ -55,6 +55,19 @@ const SUBSCRIPTION_CATALOG: Record<Plan, { title: string; usd: Record<Billing, n
 const EXTRAS_CATALOG: Record<ExtraType, { title: string; usd: number; ars: number }> = {
   extra_question: { title: 'Pregunta extra', usd: 12, ars: 12000 },
   private_session: { title: 'Sesión privada', usd: 45, ars: 43000 },
+};
+
+/** Portal extras catalog (USD); ARS for Mercado Pago ≈ usd * 1450. Keep aligned with frontend `extraServicesCatalog`. */
+const PORTAL_EXTRA_SERVICES: Record<string, { title: string; usdGuest: number; usdSub: number }> = {
+  'momento-actual': { title: 'Lectura de tu momento actual + preguntas', usdGuest: 210, usdSub: 105 },
+  'energia-interna': { title: 'Tu energía interna vs la que estás mostrando', usdGuest: 110, usdSub: 55 },
+  'tomar-decision': { title: 'Tomar una decisión', usdGuest: 110, usdSub: 55 },
+  'movimientos-6m': { title: 'Tus próximos movimientos — 6 meses', usdGuest: 180, usdSub: 90 },
+  'movimientos-12m': { title: 'Tus próximos movimientos — 12 meses', usdGuest: 230, usdSub: 115 },
+  'audio-personalizado': { title: 'Audio personalizado de lo que necesites', usdGuest: 50, usdSub: 25 },
+  'carta-vivo': { title: 'Lectura en vivo de tu carta astral', usdGuest: 540, usdSub: 270 },
+  'solar-vivo': { title: 'Lectura en vivo de tu revolución solar', usdGuest: 540, usdSub: 270 },
+  'tres-preguntas': { title: '3 preguntas (respondo integrando todas mis herramientas)', usdGuest: 70, usdSub: 35 },
 };
 
 function encodeExternalReference(input: Record<string, string>): string {
@@ -225,6 +238,38 @@ export class PaymentsService {
     return token;
   }
 
+  private getPayPalApiBase(): string {
+    return process.env.PAYPAL_MODE === 'live' ? 'https://api-m.paypal.com' : 'https://api-m.sandbox.paypal.com';
+  }
+
+  private async getPayPalAccessToken(): Promise<string> {
+    const clientId = process.env.PAYPAL_CLIENT_ID;
+    const secret = process.env.PAYPAL_CLIENT_SECRET;
+    if (!clientId || !secret) throw new BadRequestException('Missing PAYPAL_CLIENT_ID or PAYPAL_CLIENT_SECRET');
+    const base = this.getPayPalApiBase();
+    const auth = Buffer.from(`${clientId}:${secret}`).toString('base64');
+    const res = await fetch(`${base}/v1/oauth2/token`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Basic ${auth}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: 'grant_type=client_credentials',
+    });
+    const body = (await res.json().catch(() => ({}))) as { access_token?: string; error_description?: string };
+    if (!res.ok || !body.access_token) {
+      throw new BadRequestException(body.error_description ?? 'PayPal authentication failed');
+    }
+    return body.access_token;
+  }
+
+  private async clearExtrasCart(userId: string): Promise<void> {
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: { extrasCartServiceIds: [] },
+    });
+  }
+
   async createSubscriptionCheckout(userId: string, input: SubscriptionCheckoutInput): Promise<CheckoutResult> {
     const user = await this.requireClient(userId);
 
@@ -384,9 +429,9 @@ export class PaymentsService {
         },
         auto_return: 'approved',
         back_urls: {
-          success: `${FRONTEND_BASE}/portal/purchase?provider=mercadopago&status=success`,
-          failure: `${FRONTEND_BASE}/portal/purchase?provider=mercadopago&status=failure`,
-          pending: `${FRONTEND_BASE}/portal/purchase?provider=mercadopago&status=pending`,
+          success: `${FRONTEND_BASE}/portal/extra-services?provider=mercadopago&status=success`,
+          failure: `${FRONTEND_BASE}/portal/extra-services?provider=mercadopago&status=failure`,
+          pending: `${FRONTEND_BASE}/portal/extra-services?provider=mercadopago&status=pending`,
         },
       }),
     });
@@ -395,6 +440,216 @@ export class PaymentsService {
       throw new BadRequestException(body.message ?? 'Failed to create Mercado Pago checkout');
     }
     return { provider: 'mercadopago', checkoutUrl: body.init_point, reference: body.id ?? externalReference };
+  }
+
+  private async createPayPalExtrasCartOrder(
+    user: { id: string; email: string; name: string },
+    lines: { title: string; usd: number }[],
+    totalUsd: number,
+  ): Promise<CheckoutResult> {
+    const token = await this.getPayPalAccessToken();
+    const base = this.getPayPalApiBase();
+    const valueStr = totalUsd.toFixed(2);
+    const items = lines.map((l) => ({
+      name: l.title.length > 120 ? `${l.title.slice(0, 117)}...` : l.title,
+      unit_amount: { currency_code: 'USD', value: l.usd.toFixed(2) },
+      quantity: '1',
+      category: 'DIGITAL_GOODS' as const,
+    }));
+    const res = await fetch(`${base}/v2/checkout/orders`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        intent: 'CAPTURE',
+        purchase_units: [
+          {
+            reference_id: 'extras_cart',
+            custom_id: user.id,
+            description: `Servicios extras (${lines.length})`,
+            amount: {
+              currency_code: 'USD',
+              value: valueStr,
+              breakdown: {
+                item_total: { currency_code: 'USD', value: valueStr },
+              },
+            },
+            items,
+          },
+        ],
+        application_context: {
+          brand_name: 'Astar',
+          landing_page: 'NO_PREFERENCE',
+          user_action: 'PAY_NOW',
+          return_url: `${FRONTEND_BASE}/portal/orders?provider=paypal&status=success`,
+          cancel_url: `${FRONTEND_BASE}/portal/orders?provider=paypal&status=cancelled`,
+        },
+      }),
+    });
+    const body = (await res.json().catch(() => ({}))) as {
+      id?: string;
+      links?: { href: string; rel: string; method?: string }[];
+      message?: string;
+    };
+    if (!res.ok || !body.id) {
+      throw new BadRequestException(typeof body.message === 'string' ? body.message : 'Failed to create PayPal order');
+    }
+    const approve = body.links?.find((l) => l.rel === 'approve' && l.method === 'GET');
+    if (!approve?.href) {
+      throw new BadRequestException('PayPal approval URL missing');
+    }
+    return { provider: 'paypal', checkoutUrl: approve.href, reference: body.id };
+  }
+
+  async createExtrasCartCheckout(userId: string, input: { provider: 'mercadopago' | 'paypal' }): Promise<CheckoutResult> {
+    const user = await this.requireClient(userId);
+    const row = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { extrasCartServiceIds: true },
+    });
+    const ids = row?.extrasCartServiceIds ?? [];
+    if (ids.length === 0) throw new BadRequestException('Tu carrito está vacío');
+
+    const isSub = user.subscriptionStatus === 'active';
+    const lines: { id: string; title: string; usd: number; ars: number }[] = [];
+    for (const id of ids) {
+      const p = PORTAL_EXTRA_SERVICES[id];
+      if (!p) throw new BadRequestException('Carrito inválido');
+      const usd = isSub ? p.usdSub : p.usdGuest;
+      const ars = Math.round(usd * 1450);
+      lines.push({ id, title: p.title, usd, ars });
+    }
+    const totalUsd = lines.reduce((s, l) => s + l.usd, 0);
+    const serviceIdsCsv = ids.join(',');
+
+    if (input.provider === 'paypal') {
+      return this.createPayPalExtrasCartOrder(
+        user,
+        lines.map((l) => ({ title: l.title, usd: l.usd })),
+        totalUsd,
+      );
+    }
+
+    if (input.provider !== 'mercadopago') throw new BadRequestException('Invalid provider');
+
+    const accessToken = this.getMercadoPagoToken();
+    const externalReference = encodeExternalReference({
+      userId,
+      paymentKind: 'extras_cart',
+      serviceIds: serviceIdsCsv,
+      provider: 'mercadopago',
+    });
+
+    const mpItems = lines.map((l) => ({
+      title: l.title.length > 250 ? `${l.title.slice(0, 247)}…` : l.title,
+      quantity: 1,
+      currency_id: 'ARS',
+      unit_price: l.ars,
+    }));
+
+    const res = await fetch('https://api.mercadopago.com/checkout/preferences', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        items: mpItems,
+        external_reference: externalReference,
+        metadata: {
+          userId,
+          paymentKind: 'extras_cart',
+          serviceIds: serviceIdsCsv,
+          provider: 'mercadopago',
+        },
+        auto_return: 'approved',
+        back_urls: {
+          success: `${FRONTEND_BASE}/portal/orders?provider=mercadopago&status=success`,
+          failure: `${FRONTEND_BASE}/portal/orders?provider=mercadopago&status=failure`,
+          pending: `${FRONTEND_BASE}/portal/orders?provider=mercadopago&status=pending`,
+        },
+      }),
+    });
+    const mpBody = (await res.json().catch(() => ({}))) as { init_point?: string; id?: string; message?: string };
+    if (!res.ok || !mpBody.init_point) {
+      throw new BadRequestException(mpBody.message ?? 'Failed to create Mercado Pago checkout');
+    }
+    return { provider: 'mercadopago', checkoutUrl: mpBody.init_point, reference: mpBody.id ?? externalReference };
+  }
+
+  async confirmPayPalOrder(userId: string, orderId: string) {
+    await this.requireClient(userId);
+    if (!orderId?.trim()) throw new BadRequestException('orderId is required');
+
+    const accessToken = await this.getPayPalAccessToken();
+    const base = this.getPayPalApiBase();
+
+    const getRes = await fetch(`${base}/v2/checkout/orders/${encodeURIComponent(orderId)}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    const existing = (await getRes.json().catch(() => ({}))) as {
+      id?: string;
+      status?: string;
+      purchase_units?: Array<{ custom_id?: string }>;
+    };
+    if (!getRes.ok) throw new BadRequestException('Invalid PayPal order');
+    const customId = existing.purchase_units?.[0]?.custom_id;
+    if (customId !== userId) throw new ForbiddenException('PayPal order does not belong to user');
+
+    type CapShape = {
+      status?: string;
+      purchase_units?: Array<{
+        payments?: { captures?: Array<{ amount?: { currency_code?: string; value?: string } }> };
+        amount?: { currency_code?: string; value?: string };
+      }>;
+      message?: string;
+    };
+
+    let capBody: CapShape;
+
+    if (existing.status === 'COMPLETED') {
+      capBody = existing as CapShape;
+    } else {
+      const capRes = await fetch(`${base}/v2/checkout/orders/${encodeURIComponent(orderId)}/capture`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          Prefer: 'return=representation',
+        },
+      });
+      capBody = (await capRes.json().catch(() => ({}))) as CapShape;
+      if (!capRes.ok || capBody.status !== 'COMPLETED') {
+        throw new BadRequestException(capBody.message ?? 'PayPal capture failed');
+      }
+    }
+
+    const pu0 = capBody.purchase_units?.[0];
+    const capture = pu0?.payments?.captures?.[0];
+    const amountVal = capture?.amount?.value ?? pu0?.amount?.value ?? '0';
+    const currency = capture?.amount?.currency_code ?? pu0?.amount?.currency_code ?? 'USD';
+
+    const snapshot = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { extrasCartServiceIds: true },
+    });
+    const type = `extras_cart:${(snapshot?.extrasCartServiceIds ?? []).join('|') || 'paid'}`;
+
+    await this.createOrderIfMissing({
+      userId,
+      type,
+      amount: `${amountVal} ${currency}`,
+      method: `paypal:${orderId}`,
+    });
+    await this.clearExtrasCart(userId);
+
+    return {
+      ok: true,
+      provider: 'paypal' as const,
+      paymentKind: 'extras_cart' as const,
+    };
   }
 
   private async createOrderIfMissing(params: {
@@ -752,7 +1007,11 @@ export class PaymentsService {
     const ownerUserId = metadata.userId ?? refData.userId;
     if (ownerUserId !== userId) throw new ForbiddenException('Payment does not belong to user');
 
-    const paymentKind = (metadata.paymentKind ?? refData.paymentKind) as 'subscription' | 'extra' | undefined;
+    const paymentKind = (metadata.paymentKind ?? refData.paymentKind) as
+      | 'subscription'
+      | 'extra'
+      | 'extras_cart'
+      | undefined;
     if (!paymentKind) throw new BadRequestException('Missing payment metadata');
 
     const method = `mercadopago:${paymentId}`;
@@ -760,7 +1019,9 @@ export class PaymentsService {
     const type =
       paymentKind === 'subscription'
         ? `subscription:${metadata.plan ?? refData.plan ?? 'portal'}:${metadata.billing ?? refData.billing ?? 'monthly'}`
-        : `extra:${metadata.extraType ?? refData.extraType ?? 'extra_question'}:${metadata.quantity ?? refData.quantity ?? '1'}`;
+        : paymentKind === 'extras_cart'
+          ? `extras_cart:${metadata.serviceIds ?? refData.serviceIds ?? 'unknown'}`
+          : `extra:${metadata.extraType ?? refData.extraType ?? 'extra_question'}:${metadata.quantity ?? refData.quantity ?? '1'}`;
 
     await this.createOrderIfMissing({
       userId,
@@ -772,6 +1033,10 @@ export class PaymentsService {
     if (paymentKind === 'subscription') {
       await this.usersService.updateSubscription(userId, 'active');
       await this.ensureSubscriptionReports(userId, metadata.plan ?? refData.plan);
+    }
+
+    if (paymentKind === 'extras_cart') {
+      await this.clearExtrasCart(userId);
     }
 
     return {

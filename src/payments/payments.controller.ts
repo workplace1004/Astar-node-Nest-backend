@@ -24,6 +24,14 @@ export class PaymentsController {
     return this.paymentsService.createExtraCheckout(user.id, body);
   }
 
+  @Post('extras-cart/checkout')
+  async createExtrasCartCheckout(
+    @CurrentUser() user: { id: string },
+    @Body() body: { provider: 'mercadopago' | 'paypal' },
+  ) {
+    return this.paymentsService.createExtrasCartCheckout(user.id, body);
+  }
+
   @Post('confirm/stripe')
   async confirmStripeSession(
     @CurrentUser() user: { id: string },
@@ -46,6 +54,11 @@ export class PaymentsController {
     @Body() body: { paymentId: string },
   ) {
     return this.paymentsService.confirmMercadoPagoPayment(user.id, body.paymentId?.trim());
+  }
+
+  @Post('confirm/paypal')
+  async confirmPayPalOrder(@CurrentUser() user: { id: string }, @Body() body: { orderId: string }) {
+    return this.paymentsService.confirmPayPalOrder(user.id, body.orderId?.trim());
   }
 
   @Post('subscription/cancel')

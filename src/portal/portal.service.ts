@@ -2,6 +2,32 @@ import { Injectable, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { UsersService } from '../users/users.service';
 
+/** Must match catalog ids exposed in the portal extras UI. */
+const KNOWN_EXTRA_SERVICE_IDS = new Set([
+  'momento-actual',
+  'energia-interna',
+  'tomar-decision',
+  'movimientos-6m',
+  'movimientos-12m',
+  'audio-personalizado',
+  'carta-vivo',
+  'solar-vivo',
+  'tres-preguntas',
+]);
+
+/** Display titles for extras catalog (keep in sync with portal UI). */
+const EXTRA_SERVICE_TITLES: Record<string, string> = {
+  'momento-actual': 'Lectura de tu momento actual + preguntas',
+  'energia-interna': 'Tu energía interna vs la que estás mostrando',
+  'tomar-decision': 'Tomar una decisión',
+  'movimientos-6m': 'Tus próximos movimientos — 6 meses',
+  'movimientos-12m': 'Tus próximos movimientos — 12 meses',
+  'audio-personalizado': 'Audio personalizado de lo que necesites',
+  'carta-vivo': 'Lectura en vivo de tu carta astral',
+  'solar-vivo': 'Lectura en vivo de tu revolución solar',
+  'tres-preguntas': '3 preguntas (respondo integrando todas mis herramientas)',
+};
+
 @Injectable()
 export class PortalService {
   constructor(
@@ -31,17 +57,31 @@ export class PortalService {
   async getMyOrders(userId: string) {
     const user = await this.usersService.findById(userId);
     if (!user || user.role !== 'client') throw new ForbiddenException('Portal is for clients only');
-    const orders = await this.prisma.order.findMany({
-      where: { userId },
-      orderBy: { createdAt: 'desc' },
-    });
-    return orders.map((o) => ({
-      id: o.id,
-      type: o.type,
-      amount: o.amount,
-      method: o.method,
-      createdAt: o.createdAt.toISOString(),
+    const [orders, row] = await Promise.all([
+      this.prisma.order.findMany({
+        where: { userId },
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.user.findUnique({
+        where: { id: userId },
+        select: { extrasCartServiceIds: true },
+      }),
+    ]);
+    const cartIds = row?.extrasCartServiceIds ?? [];
+    const extrasCartItems = cartIds.map((id) => ({
+      id,
+      title: EXTRA_SERVICE_TITLES[id] ?? id,
     }));
+    return {
+      orders: orders.map((o) => ({
+        id: o.id,
+        type: o.type,
+        amount: o.amount,
+        method: o.method,
+        createdAt: o.createdAt.toISOString(),
+      })),
+      extrasCartItems,
+    };
   }
 
   async getReports(userId: string) {
@@ -170,6 +210,45 @@ export class PortalService {
       status: q.status,
       createdAt: q.createdAt.toISOString(),
     }));
+  }
+
+  private sanitizeExtraServiceIds(ids: unknown): string[] {
+    if (!Array.isArray(ids)) return [];
+    const out: string[] = [];
+    for (const x of ids) {
+      if (typeof x !== 'string' || x.length < 1 || x.length > 80) continue;
+      if (!KNOWN_EXTRA_SERVICE_IDS.has(x)) continue;
+      if (!out.includes(x)) out.push(x);
+    }
+    return out;
+  }
+
+  async getExtrasSelections(userId: string) {
+    const user = await this.usersService.findById(userId);
+    if (!user || user.role !== 'client') throw new ForbiddenException('Portal is for clients only');
+    const row = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { extrasFavoriteServiceIds: true, extrasCartServiceIds: true },
+    });
+    return {
+      favoriteIds: row?.extrasFavoriteServiceIds ?? [],
+      cartServiceIds: row?.extrasCartServiceIds ?? [],
+    };
+  }
+
+  async setExtrasSelections(userId: string, body: { favoriteIds?: unknown; cartServiceIds?: unknown }) {
+    const user = await this.usersService.findById(userId);
+    if (!user || user.role !== 'client') throw new ForbiddenException('Portal is for clients only');
+    const favoriteIds = this.sanitizeExtraServiceIds(body.favoriteIds);
+    const cartServiceIds = this.sanitizeExtraServiceIds(body.cartServiceIds);
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        extrasFavoriteServiceIds: favoriteIds,
+        extrasCartServiceIds: cartServiceIds,
+      },
+    });
+    return { favoriteIds, cartServiceIds };
   }
 
   async createQuestion(userId: string, questionText: string) {

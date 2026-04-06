@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Put, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { PortalService } from './portal.service';
@@ -56,5 +56,18 @@ export class PortalController {
   @Post('notifications/read-all')
   async markAllNotificationsRead(@CurrentUser() user: { id: string }) {
     return this.portalService.markAllNotificationsRead(user.id);
+  }
+
+  @Get('extras-selections')
+  async getExtrasSelections(@CurrentUser() user: { id: string }) {
+    return this.portalService.getExtrasSelections(user.id);
+  }
+
+  @Put('extras-selections')
+  async putExtrasSelections(
+    @CurrentUser() user: { id: string },
+    @Body() body: { favoriteIds?: unknown; cartServiceIds?: unknown },
+  ) {
+    return this.portalService.setExtrasSelections(user.id, body);
   }
 }
