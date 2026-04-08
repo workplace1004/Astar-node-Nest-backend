@@ -15,6 +15,19 @@ type Plan = 'essentials' | 'portal' | 'depth';
 type ExtraType = 'extra_question' | 'private_session';
 type ReportType = 'birth_chart' | 'solar_return' | 'numerology';
 
+/** PayPal Orders v2 response used after capture or GET when status is COMPLETED. */
+type PayPalCompletedOrderShape = {
+  id?: string;
+  status?: string;
+  message?: string;
+  purchase_units?: Array<{
+    custom_id?: string;
+    reference_id?: string;
+    payments?: { captures?: Array<{ amount?: { currency_code?: string; value?: string } }> };
+    amount?: { currency_code?: string; value?: string };
+  }>;
+};
+
 export interface CheckoutResult {
   provider: Provider;
   checkoutUrl: string;
@@ -588,59 +601,31 @@ export class PaymentsService {
     return { provider: 'mercadopago', checkoutUrl: mpBody.init_point, reference: mpBody.id ?? externalReference };
   }
 
-  async confirmPayPalOrder(userId: string, orderId: string) {
-    await this.requireClient(userId);
-    if (!orderId?.trim()) throw new BadRequestException('orderId is required');
-
-    const accessToken = await this.getPayPalAccessToken();
-    const base = this.getPayPalApiBase();
-
-    const getRes = await fetch(`${base}/v2/checkout/orders/${encodeURIComponent(orderId)}`, {
-      headers: { Authorization: `Bearer ${accessToken}` },
-    });
-    const existing = (await getRes.json().catch(() => ({}))) as {
-      id?: string;
-      status?: string;
-      purchase_units?: Array<{ custom_id?: string; reference_id?: string }>;
-    };
-    if (!getRes.ok) throw new BadRequestException('Invalid PayPal order');
-    const customId = existing.purchase_units?.[0]?.custom_id;
-    if (customId !== userId) throw new ForbiddenException('PayPal order does not belong to user');
-
-    type CapShape = {
-      status?: string;
-      purchase_units?: Array<{
-        reference_id?: string;
-        payments?: { captures?: Array<{ amount?: { currency_code?: string; value?: string } }> };
-        amount?: { currency_code?: string; value?: string };
-      }>;
-      message?: string;
-    };
-
-    let capBody: CapShape;
-
-    if (existing.status === 'COMPLETED') {
-      capBody = existing as CapShape;
-    } else {
-      const capRes = await fetch(`${base}/v2/checkout/orders/${encodeURIComponent(orderId)}/capture`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-          Prefer: 'return=representation',
-        },
-      });
-      capBody = (await capRes.json().catch(() => ({}))) as CapShape;
-      if (!capRes.ok || capBody.status !== 'COMPLETED') {
-        throw new BadRequestException(capBody.message ?? 'PayPal capture failed');
-      }
-    }
-
-    const pu0 = capBody.purchase_units?.[0];
+  /** Order shape after GET or capture (PayPal Orders v2). */
+  private parsePayPalOrderCompletedBody(order: PayPalCompletedOrderShape): {
+    amountVal: string;
+    currency: string;
+    referenceId: string;
+  } {
+    const pu0 = order.purchase_units?.[0];
     const capture = pu0?.payments?.captures?.[0];
     const amountVal = capture?.amount?.value ?? pu0?.amount?.value ?? '0';
     const currency = capture?.amount?.currency_code ?? pu0?.amount?.currency_code ?? 'USD';
     const referenceId = pu0?.reference_id ?? '';
+    return { amountVal, currency, referenceId };
+  }
+
+  private async applyPayPalFulfillmentFromCompletedOrder(
+    userId: string,
+    orderId: string,
+    order: PayPalCompletedOrderShape,
+  ): Promise<{
+    ok: true;
+    provider: 'paypal';
+    paymentKind: 'subscription' | 'extras_cart';
+    subscriptionStatus?: 'active';
+  }> {
+    const { amountVal, currency, referenceId } = this.parsePayPalOrderCompletedBody(order);
 
     if (referenceId.startsWith('subscription:')) {
       const parts = referenceId.split(':');
@@ -690,6 +675,169 @@ export class PaymentsService {
     }
 
     throw new BadRequestException('Unknown PayPal order type');
+  }
+
+  async confirmPayPalOrder(userId: string, orderId: string) {
+    await this.requireClient(userId);
+    if (!orderId?.trim()) throw new BadRequestException('orderId is required');
+
+    const accessToken = await this.getPayPalAccessToken();
+    const base = this.getPayPalApiBase();
+
+    const getRes = await fetch(`${base}/v2/checkout/orders/${encodeURIComponent(orderId)}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    const existing = (await getRes.json().catch(() => ({}))) as PayPalCompletedOrderShape & {
+      purchase_units?: Array<{ custom_id?: string; reference_id?: string }>;
+    };
+    if (!getRes.ok) throw new BadRequestException('Invalid PayPal order');
+    const customId = existing.purchase_units?.[0]?.custom_id;
+    if (customId !== userId) throw new ForbiddenException('PayPal order does not belong to user');
+
+    let capBody: PayPalCompletedOrderShape;
+
+    if (existing.status === 'COMPLETED') {
+      capBody = existing;
+    } else {
+      const capRes = await fetch(`${base}/v2/checkout/orders/${encodeURIComponent(orderId)}/capture`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+          Prefer: 'return=representation',
+        },
+      });
+      capBody = (await capRes.json().catch(() => ({}))) as PayPalCompletedOrderShape;
+      if (!capRes.ok || capBody.status !== 'COMPLETED') {
+        throw new BadRequestException(
+          (capBody as { message?: string }).message ?? 'PayPal capture failed',
+        );
+      }
+    }
+
+    return this.applyPayPalFulfillmentFromCompletedOrder(userId, orderId, capBody);
+  }
+
+  async handlePayPalWebhook(input: {
+    headers: Record<string, string | string[] | undefined>;
+    body: unknown;
+  }): Promise<{ received: true; processed: boolean; detail?: string }> {
+    const webhookId = process.env.PAYPAL_WEBHOOK_ID?.trim();
+    if (webhookId) {
+      const ok = await this.verifyPayPalWebhookSignature(input.headers, input.body, webhookId);
+      if (!ok) {
+        this.logger.warn('PayPal webhook signature verification failed');
+        throw new UnauthorizedException('Invalid PayPal webhook signature');
+      }
+    } else {
+      this.logger.warn(
+        'PAYPAL_WEBHOOK_ID is not set; PayPal webhook signatures are not verified (set it in production).',
+      );
+    }
+
+    const event = input.body as Record<string, unknown>;
+    const eventType = typeof event.event_type === 'string' ? event.event_type : '';
+
+    if (eventType !== 'PAYMENT.CAPTURE.COMPLETED') {
+      return { received: true, processed: false, detail: eventType || 'ignored' };
+    }
+
+    const resource = event.resource as Record<string, unknown> | undefined;
+    const orderId = this.extractPayPalOrderIdFromCaptureWebhookResource(resource);
+    if (!orderId) {
+      return { received: true, processed: false, detail: 'no_order_id' };
+    }
+
+    let accessToken: string;
+    try {
+      accessToken = await this.getPayPalAccessToken();
+    } catch {
+      this.logger.error('PayPal webhook: missing PAYPAL_CLIENT_ID / PAYPAL_CLIENT_SECRET');
+      return { received: true, processed: false, detail: 'missing_paypal_credentials' };
+    }
+
+    const base = this.getPayPalApiBase();
+    const getRes = await fetch(`${base}/v2/checkout/orders/${encodeURIComponent(orderId)}`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    const order = (await getRes.json().catch(() => ({}))) as PayPalCompletedOrderShape & {
+      purchase_units?: Array<{ custom_id?: string }>;
+    };
+    if (!getRes.ok) {
+      return { received: true, processed: false, detail: 'order_fetch_failed' };
+    }
+
+    if (order.status !== 'COMPLETED') {
+      return { received: true, processed: false, detail: `order_${order.status ?? 'unknown'}` };
+    }
+
+    const userId = order.purchase_units?.[0]?.custom_id?.trim();
+    if (!userId) {
+      return { received: true, processed: false, detail: 'no_custom_id' };
+    }
+
+    try {
+      await this.applyPayPalFulfillmentFromCompletedOrder(userId, orderId, order);
+      this.logger.log(`PayPal webhook fulfilled order ${orderId} for user ${userId}`);
+      return { received: true, processed: true };
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      this.logger.error(`PayPal webhook fulfill failed for ${orderId}: ${msg}`);
+      return { received: true, processed: false, detail: 'fulfill_error' };
+    }
+  }
+
+  private extractPayPalOrderIdFromCaptureWebhookResource(
+    resource: Record<string, unknown> | undefined,
+  ): string | null {
+    if (!resource) return null;
+    const sup = resource.supplementary_data as Record<string, unknown> | undefined;
+    const related = sup?.related_ids as Record<string, unknown> | undefined;
+    const oid = related?.order_id;
+    if (typeof oid === 'string' && oid.trim()) return oid.trim();
+    return null;
+  }
+
+  private async verifyPayPalWebhookSignature(
+    headers: Record<string, string | string[] | undefined>,
+    body: unknown,
+    webhookId: string,
+  ): Promise<boolean> {
+    const authAlgo = this.getHeader(headers, 'paypal-auth-algo');
+    const certUrl = this.getHeader(headers, 'paypal-cert-url');
+    const transmissionId = this.getHeader(headers, 'paypal-transmission-id');
+    const transmissionSig = this.getHeader(headers, 'paypal-transmission-sig');
+    const transmissionTime = this.getHeader(headers, 'paypal-transmission-time');
+    if (!authAlgo || !certUrl || !transmissionId || !transmissionSig || !transmissionTime) {
+      return false;
+    }
+
+    let accessToken: string;
+    try {
+      accessToken = await this.getPayPalAccessToken();
+    } catch {
+      return false;
+    }
+
+    const base = this.getPayPalApiBase();
+    const res = await fetch(`${base}/v1/notifications/verify-webhook-signature`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        auth_algo: authAlgo,
+        cert_url: certUrl,
+        transmission_id: transmissionId,
+        transmission_sig: transmissionSig,
+        transmission_time: transmissionTime,
+        webhook_id: webhookId,
+        webhook_event: body,
+      }),
+    });
+    const data = (await res.json().catch(() => ({}))) as { verification_status?: string };
+    return res.ok && data.verification_status === 'SUCCESS';
   }
 
   private async createOrderIfMissing(params: {
