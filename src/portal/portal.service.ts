@@ -28,6 +28,11 @@ const EXTRA_SERVICE_TITLES: Record<string, string> = {
   'tres-preguntas': '3 preguntas (respondo integrando todas mis herramientas)',
 };
 
+/** Misma cuenta puede usar el portal cliente (admin o cliente). */
+function canUseClientPortal(role: string): boolean {
+  return role === 'client' || role === 'admin';
+}
+
 @Injectable()
 export class PortalService {
   constructor(
@@ -38,7 +43,7 @@ export class PortalService {
   async getProfile(userId: string) {
     const user = await this.usersService.findById(userId);
     if (!user) return null;
-    if (user.role !== 'client') throw new ForbiddenException('Portal is for clients only');
+    if (!canUseClientPortal(user.role)) throw new ForbiddenException('Portal is for clients only');
     return {
       id: user.id,
       email: user.email,
@@ -56,7 +61,7 @@ export class PortalService {
 
   async getMyOrders(userId: string) {
     const user = await this.usersService.findById(userId);
-    if (!user || user.role !== 'client') throw new ForbiddenException('Portal is for clients only');
+    if (!user || !canUseClientPortal(user.role)) throw new ForbiddenException('Portal is for clients only');
     const [orders, row] = await Promise.all([
       this.prisma.order.findMany({
         where: { userId },
@@ -86,7 +91,7 @@ export class PortalService {
 
   async getReports(userId: string) {
     const user = await this.usersService.findById(userId);
-    if (!user || user.role !== 'client') throw new ForbiddenException('Portal is for clients only');
+    if (!user || !canUseClientPortal(user.role)) throw new ForbiddenException('Portal is for clients only');
     const reports = await this.prisma.report.findMany({
       where: { userId },
       orderBy: { createdAt: 'desc' },
@@ -102,7 +107,7 @@ export class PortalService {
 
   async getReportByType(userId: string, type: string) {
     const user = await this.usersService.findById(userId);
-    if (!user || user.role !== 'client') throw new ForbiddenException('Portal is for clients only');
+    if (!user || !canUseClientPortal(user.role)) throw new ForbiddenException('Portal is for clients only');
     const report = await this.prisma.report.findFirst({
       where: { userId, type },
       orderBy: { createdAt: 'desc' },
@@ -120,7 +125,7 @@ export class PortalService {
 
   async getMessages(userId: string) {
     const user = await this.usersService.findById(userId);
-    if (!user || user.role !== 'client') throw new ForbiddenException('Portal is for clients only');
+    if (!user || !canUseClientPortal(user.role)) throw new ForbiddenException('Portal is for clients only');
     const messages = await this.prisma.message.findMany({
       where: { userId },
       orderBy: { createdAt: 'desc' },
@@ -157,7 +162,7 @@ export class PortalService {
 
   async getNotifications(userId: string) {
     const user = await this.usersService.findById(userId);
-    if (!user || user.role !== 'client') throw new ForbiddenException('Portal is for clients only');
+    if (!user || !canUseClientPortal(user.role)) throw new ForbiddenException('Portal is for clients only');
     const notifications = await this.prisma.notification.findMany({
       where: { userId },
       orderBy: { createdAt: 'desc' },
@@ -174,7 +179,7 @@ export class PortalService {
 
   async markNotificationRead(userId: string, notificationId: string) {
     const user = await this.usersService.findById(userId);
-    if (!user || user.role !== 'client') throw new ForbiddenException('Portal is for clients only');
+    if (!user || !canUseClientPortal(user.role)) throw new ForbiddenException('Portal is for clients only');
     const n = await this.prisma.notification.findFirst({
       where: { id: notificationId, userId },
     });
@@ -188,7 +193,7 @@ export class PortalService {
 
   async markAllNotificationsRead(userId: string) {
     const user = await this.usersService.findById(userId);
-    if (!user || user.role !== 'client') throw new ForbiddenException('Portal is for clients only');
+    if (!user || !canUseClientPortal(user.role)) throw new ForbiddenException('Portal is for clients only');
     await this.prisma.notification.updateMany({
       where: { userId },
       data: { read: true },
@@ -198,7 +203,7 @@ export class PortalService {
 
   async getMyQuestions(userId: string) {
     const user = await this.usersService.findById(userId);
-    if (!user || user.role !== 'client') throw new ForbiddenException('Portal is for clients only');
+    if (!user || !canUseClientPortal(user.role)) throw new ForbiddenException('Portal is for clients only');
     const questions = await this.prisma.question.findMany({
       where: { userId },
       orderBy: { createdAt: 'desc' },
@@ -225,7 +230,7 @@ export class PortalService {
 
   async getExtrasSelections(userId: string) {
     const user = await this.usersService.findById(userId);
-    if (!user || user.role !== 'client') throw new ForbiddenException('Portal is for clients only');
+    if (!user || !canUseClientPortal(user.role)) throw new ForbiddenException('Portal is for clients only');
     const row = await this.prisma.user.findUnique({
       where: { id: userId },
       select: { extrasFavoriteServiceIds: true, extrasCartServiceIds: true },
@@ -238,7 +243,7 @@ export class PortalService {
 
   async setExtrasSelections(userId: string, body: { favoriteIds?: unknown; cartServiceIds?: unknown }) {
     const user = await this.usersService.findById(userId);
-    if (!user || user.role !== 'client') throw new ForbiddenException('Portal is for clients only');
+    if (!user || !canUseClientPortal(user.role)) throw new ForbiddenException('Portal is for clients only');
     const favoriteIds = this.sanitizeExtraServiceIds(body.favoriteIds);
     const cartServiceIds = this.sanitizeExtraServiceIds(body.cartServiceIds);
     await this.prisma.user.update({
@@ -253,7 +258,7 @@ export class PortalService {
 
   async createQuestion(userId: string, questionText: string) {
     const user = await this.usersService.findById(userId);
-    if (!user || user.role !== 'client') throw new ForbiddenException('Portal is for clients only');
+    if (!user || !canUseClientPortal(user.role)) throw new ForbiddenException('Portal is for clients only');
     if (!questionText || questionText.length < 1) {
       throw new ForbiddenException('Question text is required');
     }

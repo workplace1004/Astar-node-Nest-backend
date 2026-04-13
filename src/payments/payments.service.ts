@@ -238,7 +238,9 @@ export class PaymentsService {
   private async requireClient(userId: string) {
     const user = await this.usersService.findById(userId);
     if (!user) throw new UnauthorizedException('User not found');
-    if (user.role !== 'client') throw new ForbiddenException('Payments are for client users only');
+    if (user.role !== 'client' && user.role !== 'admin') {
+      throw new ForbiddenException('Payments are for client users only');
+    }
     return user;
   }
 
