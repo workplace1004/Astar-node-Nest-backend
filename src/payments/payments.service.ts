@@ -1043,6 +1043,29 @@ export class PaymentsService {
     };
   }
 
+  /**
+   * Si el usuario tiene suscripción activa y aún no tiene filas de reporte (p. ej. pago confirmado sin webhook),
+   * crea los borradores base. El plan se infiere del último pedido `subscription:…` si existe; si no, conjunto portal/depth.
+   */
+  async syncSubscriptionReportsIfNeeded(userId: string): Promise<void> {
+    const user = await this.usersService.findById(userId);
+    if (!user || user.subscriptionStatus !== 'active') return;
+    const plan = await this.inferSubscriptionPlanFromOrders(userId);
+    await this.ensureSubscriptionReports(userId, plan);
+  }
+
+  private async inferSubscriptionPlanFromOrders(userId: string): Promise<string | undefined> {
+    const order = await this.prisma.order.findFirst({
+      where: { userId, type: { startsWith: 'subscription:' } },
+      orderBy: { createdAt: 'desc' },
+      select: { type: true },
+    });
+    if (!order?.type) return undefined;
+    const parts = order.type.split(':');
+    if (parts.length >= 2 && parts[0] === 'subscription') return parts[1];
+    return undefined;
+  }
+
   private async ensureSubscriptionReports(userId: string, plan: string | undefined): Promise<void> {
     const requiredTypes = this.getReportTypesForPlan(plan);
     const user = await this.usersService.findById(userId);

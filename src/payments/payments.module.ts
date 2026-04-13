@@ -10,5 +10,6 @@ import { PrismaModule } from '../prisma/prisma.module';
   imports: [UsersModule, PrismaModule],
   controllers: [PaymentsController, MercadoPagoWebhookController, PayPalWebhookController],
   providers: [PaymentsService],
+  exports: [PaymentsService],
 })
 export class PaymentsModule {}

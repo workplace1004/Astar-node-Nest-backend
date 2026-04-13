@@ -1,6 +1,7 @@
 import { Injectable, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { UsersService } from '../users/users.service';
+import { PaymentsService } from '../payments/payments.service';
 
 /** Must match catalog ids exposed in the portal extras UI. */
 const KNOWN_EXTRA_SERVICE_IDS = new Set([
@@ -38,6 +39,7 @@ export class PortalService {
   constructor(
     private prisma: PrismaService,
     private usersService: UsersService,
+    private paymentsService: PaymentsService,
   ) {}
 
   async getProfile(userId: string) {
@@ -92,6 +94,7 @@ export class PortalService {
   async getReports(userId: string) {
     const user = await this.usersService.findById(userId);
     if (!user || !canUseClientPortal(user.role)) throw new ForbiddenException('Portal is for clients only');
+    await this.paymentsService.syncSubscriptionReportsIfNeeded(userId);
     const reports = await this.prisma.report.findMany({
       where: { userId },
       orderBy: { createdAt: 'desc' },
@@ -108,6 +111,7 @@ export class PortalService {
   async getReportByType(userId: string, type: string) {
     const user = await this.usersService.findById(userId);
     if (!user || !canUseClientPortal(user.role)) throw new ForbiddenException('Portal is for clients only');
+    await this.paymentsService.syncSubscriptionReportsIfNeeded(userId);
     const report = await this.prisma.report.findFirst({
       where: { userId, type },
       orderBy: { createdAt: 'desc' },
