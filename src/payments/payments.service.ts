@@ -6,6 +6,15 @@ import {
   Logger,
   UnauthorizedException,
 } from '@nestjs/common';
+import { AstrologyClient, AstrologyError } from '@astro-api/astroapi-typescript';
+import {
+  computeTimezoneOffsetHours,
+  extractPlanetaryPositionsList,
+  findPlanetDataInPayload,
+  ianaTimezoneForBirth,
+  normalizeChartString,
+  tryExtractChartFromRawText,
+} from '../common/astroapi-chart-parse';
 import { PrismaService } from '../prisma/prisma.service';
 import { UsersService } from '../users/users.service';
 
@@ -119,112 +128,6 @@ function parseBirthDateParts(birthDate: string | null | undefined): { year: numb
   if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return null;
   if (month < 1 || month > 12 || day < 1 || day > 31) return null;
   return { year, month, day };
-}
-
-function reduceNumber(value: number, preserveMaster = true): number {
-  let current = Math.abs(Math.trunc(value));
-  while (current > 9 && (!preserveMaster || ![11, 22, 33].includes(current))) {
-    current = String(current)
-      .split('')
-      .map((d) => Number(d))
-      .reduce((acc, curr) => acc + curr, 0);
-  }
-  return current;
-}
-
-function calculateLifePathNumber(birthDate: string | null | undefined): string | null {
-  const normalized = normalizeBirthDate(birthDate);
-  if (!normalized) return null;
-  const digits = normalized.replace(/-/g, '').split('').map((d) => Number(d));
-  if (digits.some((d) => Number.isNaN(d))) return null;
-  return String(reduceNumber(digits.reduce((acc, curr) => acc + curr, 0), true));
-}
-
-function calculateBirthdayNumber(day: number): number {
-  return reduceNumber(day, true);
-}
-
-function calculateAttitudeNumber(month: number, day: number): number {
-  return reduceNumber(month + day, true);
-}
-
-function calculatePersonalYear(month: number, day: number, year: number): number {
-  const universalYear = reduceNumber(year, false);
-  return reduceNumber(month + day + universalYear, true);
-}
-
-function mapNameCharsToNumber(fullName: string): { expression: number | null; soulUrge: number | null; personality: number | null } {
-  const map: Record<string, number> = {
-    A: 1, J: 1, S: 1,
-    B: 2, K: 2, T: 2,
-    C: 3, L: 3, U: 3,
-    D: 4, M: 4, V: 4,
-    E: 5, N: 5, W: 5,
-    F: 6, O: 6, X: 6,
-    G: 7, P: 7, Y: 7,
-    H: 8, Q: 8, Z: 8,
-    I: 9, R: 9,
-  };
-  const normalized = fullName
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toUpperCase();
-  const vowels = new Set(['A', 'E', 'I', 'O', 'U']);
-  let all = 0;
-  let vowelSum = 0;
-  let consonantSum = 0;
-
-  for (const ch of normalized) {
-    const val = map[ch];
-    if (!val) continue;
-    all += val;
-    if (vowels.has(ch)) vowelSum += val;
-    else consonantSum += val;
-  }
-
-  return {
-    expression: all > 0 ? reduceNumber(all, true) : null,
-    soulUrge: vowelSum > 0 ? reduceNumber(vowelSum, true) : null,
-    personality: consonantSum > 0 ? reduceNumber(consonantSum, true) : null,
-  };
-}
-
-function getSunSignFromBirthDate(birthDate: string | null | undefined): string | null {
-  const parts = parseBirthDateParts(birthDate);
-  if (!parts) return null;
-  const md = parts.month * 100 + parts.day;
-  if (md >= 321 && md <= 419) return 'Aries';
-  if (md >= 420 && md <= 520) return 'Tauro';
-  if (md >= 521 && md <= 620) return 'Géminis';
-  if (md >= 621 && md <= 722) return 'Cáncer';
-  if (md >= 723 && md <= 822) return 'Leo';
-  if (md >= 823 && md <= 922) return 'Virgo';
-  if (md >= 923 && md <= 1022) return 'Libra';
-  if (md >= 1023 && md <= 1121) return 'Escorpio';
-  if (md >= 1122 && md <= 1221) return 'Sagitario';
-  if ((md >= 1222 && md <= 1231) || (md >= 101 && md <= 119)) return 'Capricornio';
-  if (md >= 120 && md <= 218) return 'Acuario';
-  if (md >= 219 && md <= 320) return 'Piscis';
-  return null;
-}
-
-function numberMeaning(n: string | number): string {
-  const key = String(n);
-  const map: Record<string, string> = {
-    '1': 'iniciativa, autonomía y liderazgo personal',
-    '2': 'cooperación, diplomacia y sensibilidad vincular',
-    '3': 'expresión creativa, comunicación y optimismo',
-    '4': 'orden, constancia, método y construcción sólida',
-    '5': 'cambio, libertad, adaptabilidad y movimiento',
-    '6': 'responsabilidad, cuidado, armonía y servicio',
-    '7': 'introspección, análisis, estudio y profundidad',
-    '8': 'gestión, logro material, estrategia y autoridad',
-    '9': 'compasión, cierre de ciclos y visión humanista',
-    '11': 'intuición elevada, inspiración y visión sensible',
-    '22': 'maestría práctica para construir impacto duradero',
-    '33': 'servicio compasivo y vocación de guía',
-  };
-  return map[key] ?? 'potencial de aprendizaje y crecimiento';
 }
 
 @Injectable()
@@ -869,48 +772,269 @@ export class PaymentsService {
 
   private isLegacyAutoDraft(type: ReportType, content: string | null): boolean {
     if (!content) return true;
+    if (/"provider"\s*:\s*"astroapi"/i.test(content)) {
+      // Solar return v1 (solo texto): re-generar para adjuntar datos de getSolarReturnChart.
+      if (type === 'solar_return') {
+        const lower = content.toLowerCase();
+        if (
+          /"kind"\s*:\s*"solar_return"/i.test(content) &&
+          !lower.includes('"solarreturnchart"') &&
+          !lower.includes('"pending":true')
+        ) {
+          return true;
+        }
+      }
+      return false;
+    }
     const normalized = content.toLowerCase();
     if (type === 'birth_chart') {
-      return normalized.includes('tu carta de base') && normalized.includes('cómo usar este reporte');
+      const oldAutogen =
+        normalized.includes('tu carta de base') && normalized.includes('cómo usar este reporte');
+      const placeholderDraft =
+        normalized.includes('eje de identidad natal') &&
+        normalized.includes('necesitamos una fecha de nacimiento válida');
+      return oldAutogen || placeholderDraft;
     }
     if (type === 'solar_return') {
       return normalized.includes('apertura de ciclo anual') && normalized.includes('integración práctica');
     }
-    return normalized.includes('interpretación inicial') && normalized.includes('esta versión base se ampliará');
+    const oldNumerology =
+      normalized.includes('interpretación inicial') && normalized.includes('esta versión base se ampliará');
+    const placeholderNumerology =
+      normalized.includes('"number":"—"') &&
+      normalized.includes('camino de vida') &&
+      normalized.includes('completa tu fecha de nacimiento');
+    return oldNumerology || placeholderNumerology;
   }
 
-  private buildReportDraft(
+  /** Birth subject for Astrology API (natal, solar return, numerology). */
+  private buildAstroSubjectFromReportUser(user: {
+    name?: string | null;
+    email?: string | null;
+    birthDate?: string | null;
+    birthPlace?: string | null;
+    birthTime?: string | null;
+    birthLat?: number | null;
+    birthLon?: number | null;
+    birthTimezone?: string | null;
+  }): {
+    subject: {
+      name: string;
+      birth_data: {
+        year: number;
+        month: number;
+        day: number;
+        hour: number;
+        minute: number;
+        second: number;
+        latitude: number;
+        longitude: number;
+        city?: string;
+        timezone: string;
+      };
+    };
+    birthDate: string;
+    birthTime: string;
+  } | null {
+    const birthDate = normalizeBirthDate(user.birthDate);
+    const parts = parseBirthDateParts(user.birthDate);
+    if (!birthDate || !parts) return null;
+    const lat = user.birthLat;
+    const lon = user.birthLon;
+    if (typeof lat !== 'number' || !Number.isFinite(lat) || typeof lon !== 'number' || !Number.isFinite(lon)) {
+      return null;
+    }
+    const birthTimeRaw = user.birthTime?.trim() || '12:00';
+    const [hourRaw, minuteRaw] = birthTimeRaw.split(':');
+    const birthHour = Number.isFinite(Number(hourRaw)) ? Number(hourRaw) : 12;
+    const birthMinute = Number.isFinite(Number(minuteRaw)) ? Number(minuteRaw) : 0;
+    const timezoneFromInput = user.birthTimezone?.trim();
+    const resolvedTzone = timezoneFromInput
+      ? computeTimezoneOffsetHours(birthDate, birthTimeRaw, timezoneFromInput)
+      : null;
+    if (resolvedTzone == null) return null;
+    const tzIana = ianaTimezoneForBirth(timezoneFromInput, resolvedTzone);
+    if (!tzIana) return null;
+    const place = user.birthPlace?.trim();
+    const displayName = (user.name ?? '').trim() || (user.email?.split('@')[0] ?? 'Cliente');
+    const birth_data = {
+      year: parts.year,
+      month: parts.month,
+      day: parts.day,
+      hour: birthHour,
+      minute: birthMinute,
+      second: 0,
+      latitude: lat,
+      longitude: lon,
+      ...(place ? { city: place } : {}),
+      timezone: tzIana,
+    };
+    return {
+      birthDate,
+      birthTime: birthTimeRaw,
+      subject: {
+        name: displayName,
+        birth_data,
+      },
+    };
+  }
+
+  private buildReportDraftWithoutApi(
     type: ReportType,
     user: { name?: string | null; birthDate?: string | null; birthPlace?: string | null; birthTime?: string | null },
+    reason: 'missing_api_key' | 'incomplete_profile' | 'api_error',
+    detail?: string,
   ): { title: string; content: string } {
     const firstName = (user.name ?? 'Cliente').trim().split(/\s+/)[0] || 'Cliente';
     const birthDate = normalizeBirthDate(user.birthDate);
-    const birthParts = parseBirthDateParts(user.birthDate);
-    const birthPlace = user.birthPlace?.trim() || 'tu lugar de nacimiento';
-    const birthTime = user.birthTime?.trim() || 'tu hora de nacimiento';
-    const lifePath = calculateLifePathNumber(user.birthDate);
-    const sunSign = getSunSignFromBirthDate(user.birthDate);
-    const nameNumbers = mapNameCharsToNumber(user.name ?? '');
-    const birthdayNumber = birthParts ? calculateBirthdayNumber(birthParts.day) : null;
-    const attitudeNumber = birthParts ? calculateAttitudeNumber(birthParts.month, birthParts.day) : null;
-    const currentYear = new Date().getFullYear();
-    const personalYear = birthParts ? calculatePersonalYear(birthParts.month, birthParts.day, currentYear) : null;
+    const birthPlace = user.birthPlace?.trim() || '—';
+    const birthTime = user.birthTime?.trim() || '—';
+    const msg =
+      reason === 'missing_api_key'
+        ? 'El servicio de cartas no está configurado todavía (falta ASTROLOGY_API_KEY en el servidor).'
+        : reason === 'incomplete_profile'
+          ? 'Para generar tu reporte con Astrology API necesitamos fecha, hora, lugar y coordenadas (latitud, longitud y zona horaria IANA) en tu perfil.'
+          : `No pudimos obtener el reporte del proveedor astrológico.${detail ? ` Detalle: ${detail}` : ''}`;
 
     if (type === 'birth_chart') {
       return {
         title: 'Carta Natal',
-        content: JSON.stringify([
+        content: JSON.stringify({
+          provider: 'astroapi',
+          version: 1,
+          kind: 'birth_chart',
+          pending: true,
+          reason,
+          sections: [
+            {
+              id: 'estado',
+              title: 'Estado del reporte',
+              content: msg,
+            },
+            {
+              id: 'datos-base',
+              title: 'Datos registrados',
+              content: `Nombre: ${user.name ?? firstName}\nFecha: ${birthDate ?? 'pendiente'}\nHora: ${birthTime}\nLugar: ${birthPlace}`,
+            },
+          ],
+        }),
+      };
+    }
+    if (type === 'solar_return') {
+      return {
+        title: 'Revolución Solar',
+        content: JSON.stringify({
+          provider: 'astroapi',
+          version: 1,
+          kind: 'solar_return',
+          pending: true,
+          reason,
+          theme: {
+            title: 'Revolución solar',
+            subtitle: msg,
+          },
+          sections: [
+            {
+              id: 'estado',
+              title: 'Estado del reporte',
+              content: msg,
+            },
+          ],
+        }),
+      };
+    }
+    return {
+      title: 'Numerología',
+      content: JSON.stringify({
+        provider: 'astroapi',
+        version: 1,
+        kind: 'numerology',
+        pending: true,
+        reason,
+        numbers: [],
+        interpretations: [
+          {
+            id: 'estado',
+            title: 'Estado del reporte',
+            content: msg,
+          },
+        ],
+      }),
+    };
+  }
+
+  private mapNumerologyNumber(
+    n: { value: number; name?: string; meaning?: string } | undefined,
+    labelEs: string,
+  ): { number: string; label: string; desc: string } {
+    if (!n || typeof n.value !== 'number' || !Number.isFinite(n.value)) {
+      return { number: '—', label: labelEs, desc: 'No disponible en la respuesta del proveedor.' };
+    }
+    const meaning = typeof n.meaning === 'string' && n.meaning.trim() ? n.meaning.trim().slice(0, 800) : '';
+    return { number: String(n.value), label: labelEs, desc: meaning || `Número ${n.value} (${n.name ?? labelEs}).` };
+  }
+
+  private async buildReportDraft(
+    type: ReportType,
+    user: {
+      name?: string | null;
+      email?: string | null;
+      birthDate?: string | null;
+      birthPlace?: string | null;
+      birthTime?: string | null;
+      birthLat?: number | null;
+      birthLon?: number | null;
+      birthTimezone?: string | null;
+    },
+  ): Promise<{ title: string; content: string }> {
+    const apiKey = process.env.ASTROLOGY_API_KEY?.trim();
+    if (!apiKey) {
+      return this.buildReportDraftWithoutApi(type, user, 'missing_api_key');
+    }
+    const built = this.buildAstroSubjectFromReportUser(user);
+    if (!built) {
+      return this.buildReportDraftWithoutApi(type, user, 'incomplete_profile');
+    }
+    const { subject, birthDate, birthTime } = built;
+    const client = new AstrologyClient({ apiKey });
+
+    if (type === 'birth_chart') {
+      try {
+        const [svgMarkup, positionsRes] = await Promise.all([
+          client.svg.getNatalChartSvg({ subject }),
+          client.data.getPositions({
+            subject,
+            options: {
+              zodiac_type: 'Tropic',
+              active_points: ['Sun', 'Moon', 'Ascendant'],
+            },
+          }),
+        ]);
+        const chartUrl =
+          normalizeChartString(svgMarkup) ?? tryExtractChartFromRawText(typeof svgMarkup === 'string' ? svgMarkup : '');
+        const positionsPayload = { planets: extractPlanetaryPositionsList(positionsRes) };
+        const sunData = findPlanetDataInPayload(positionsPayload, ['sun', 'sol']);
+        const moonData = findPlanetDataInPayload(positionsPayload, ['moon', 'luna']);
+        const ascData = findPlanetDataInPayload(positionsPayload, ['ascendant', 'asc', 'lagna', 'rising']);
+        const sunLine = sunData
+          ? `Sol en ${sunData.sign}${sunData.degree != null ? ` (${sunData.degree.toFixed(1)}°)` : ''}.`
+          : 'Sol: no se pudo leer desde la respuesta del proveedor.';
+        const moonLine = moonData
+          ? `Luna en ${moonData.sign}${moonData.degree != null ? ` (${moonData.degree.toFixed(1)}°)` : ''}.`
+          : 'Luna: no se pudo leer desde la respuesta del proveedor.';
+        const ascLine = ascData
+          ? `Ascendente en ${ascData.sign}${ascData.degree != null ? ` (${ascData.degree.toFixed(1)}°)` : ''}.`
+          : 'Ascendente: no se pudo leer desde la respuesta del proveedor.';
+        const sections = [
           {
             id: 'datos-base',
             title: 'Datos de nacimiento utilizados',
-            content: `Nombre: ${user.name ?? firstName}\nFecha: ${birthDate ?? 'pendiente'}\nHora: ${birthTime}\nLugar: ${birthPlace}`,
+            content: `Nombre: ${subject.name}\nFecha: ${birthDate}\nHora: ${birthTime}\nLugar: ${user.birthPlace?.trim() || '—'}`,
           },
           {
             id: 'eje-identidad',
-            title: 'Eje de identidad natal',
-            content: sunSign
-              ? `Tu Sol de nacimiento se ubica en ${sunSign}. Este eje describe tu forma natural de expresarte, decidir y orientar tu energía vital.`
-              : 'Para calcular con precisión tu eje solar necesitamos una fecha de nacimiento válida en tu perfil.',
+            title: 'Eje de identidad natal (proveedor)',
+            content: [sunLine, moonLine, ascLine].join('\n'),
           },
           {
             id: 'guia-practica',
@@ -918,130 +1042,139 @@ export class PaymentsService {
             content:
               'Usa esta carta como mapa base: 1) observa tus patrones repetidos, 2) cruza hallazgos con tus decisiones actuales, 3) integra tus mensajes mensuales para aterrizar acciones.',
           },
-        ]),
-      };
+        ];
+        return {
+          title: 'Carta Natal',
+          content: JSON.stringify({
+            provider: 'astroapi',
+            version: 1,
+            kind: 'birth_chart',
+            chartUrl: chartUrl ?? null,
+            sections,
+          }),
+        };
+      } catch (err) {
+        const astroErr = AstrologyError.normalize(err);
+        this.logger.warn(`AstroAPI birth_chart draft failed: ${astroErr.message}`);
+        return this.buildReportDraftWithoutApi(type, user, 'api_error', astroErr.message);
+      }
     }
 
     if (type === 'solar_return') {
-      return {
-        title: 'Revolución Solar',
-        content: JSON.stringify({
-          theme: {
-            title: 'Apertura de ciclo anual',
-            subtitle: `Tu revolución solar para ${firstName} ya está habilitada.`,
-          },
-          sections: [
-            {
-              id: 'cycle',
-              title: 'Enfoque del año',
-              content:
-                'La Revolución Solar marca el tono de tu ciclo anual entre cumpleaños. Este informe inicia tu seguimiento del año y se complementa con tus mensajes y preguntas del portal.',
+      const returnYear = new Date().getFullYear();
+      try {
+        const [chartOutcome, reportOutcome] = await Promise.allSettled([
+          client.charts.getSolarReturnChart({
+            subject,
+            return_year: returnYear,
+            options: { zodiac_type: 'Tropic' },
+          }),
+          client.analysis.getSolarReturnReport({
+            subject,
+            return_year: returnYear,
+            options: { zodiac_type: 'Tropic' },
+          }),
+        ]);
+
+        if (reportOutcome.status === 'rejected') {
+          throw reportOutcome.reason;
+        }
+        const srReport = reportOutcome.value;
+
+        if (chartOutcome.status === 'rejected') {
+          this.logger.warn(
+            `AstroAPI solar_return chart data skipped: ${AstrologyError.normalize(chartOutcome.reason).message}`,
+          );
+        }
+
+        let solarReturnChart: {
+          sun: { sign: string; degree: number | null } | null;
+          moon: { sign: string; degree: number | null } | null;
+          ascendant: { sign: string; degree: number | null } | null;
+        } | null = null;
+        if (chartOutcome.status === 'fulfilled') {
+          const chartData = chartOutcome.value.chart_data;
+          const positionsPayload = { planets: extractPlanetaryPositionsList(chartData) };
+          const sunData = findPlanetDataInPayload(positionsPayload, ['sun', 'sol']);
+          const moonData = findPlanetDataInPayload(positionsPayload, ['moon', 'luna']);
+          const ascData = findPlanetDataInPayload(positionsPayload, ['ascendant', 'asc', 'lagna', 'rising']);
+          solarReturnChart = {
+            sun: sunData ? { sign: sunData.sign, degree: sunData.degree } : null,
+            moon: moonData ? { sign: moonData.sign, degree: moonData.degree } : null,
+            ascendant: ascData ? { sign: ascData.sign, degree: ascData.degree } : null,
+          };
+        }
+
+        const apiInterps = Array.isArray(srReport.interpretations) ? srReport.interpretations : [];
+        const interpretations = apiInterps.map((interp: { title?: string; text?: string }, i: number) => ({
+          id: `sr-${i}`,
+          title: typeof interp.title === 'string' ? interp.title : `Interpretación ${i + 1}`,
+          content: typeof interp.text === 'string' ? interp.text : '',
+        }));
+
+        const chartHint = solarReturnChart?.sun
+          ? ' Incluye posiciones clave (Sol/Luna/Ascendente) de la carta de revolución solar.'
+          : '';
+
+        return {
+          title: 'Revolución Solar',
+          content: JSON.stringify({
+            provider: 'astroapi',
+            version: 2,
+            kind: 'solar_return',
+            returnYear,
+            solarReturnChart,
+            theme: {
+              title: `Revolución solar ${returnYear}`,
+              subtitle: `Interpretaciones y datos de carta (Astrology API) para tu ciclo anual.${chartHint}`,
             },
-            {
-              id: 'timing',
-              title: 'Timing recomendado',
-              content:
-                'Te sugerimos revisar este reporte al comienzo de cada mes para detectar prioridades, ajustar foco y tomar decisiones con más contexto.',
-            },
-            {
-              id: 'contexto',
-              title: 'Contexto de nacimiento aplicado',
-              content:
-                `Base registrada: ${birthDate ?? 'fecha pendiente'} - ${birthTime} - ${birthPlace}. Con estos datos podrás contrastar tu ciclo anual con tu carta natal.`,
-            },
-          ],
-        }),
-      };
+            interpretations,
+          }),
+        };
+      } catch (err) {
+        const astroErr = AstrologyError.normalize(err);
+        this.logger.warn(`AstroAPI solar_return draft failed: ${astroErr.message}`);
+        return this.buildReportDraftWithoutApi(type, user, 'api_error', astroErr.message);
+      }
     }
 
-    return {
-      title: 'Numerología',
-      content: JSON.stringify({
-        numbers: [
-          {
-            number: lifePath ?? '—',
-            label: 'Camino de Vida',
-            desc: lifePath
-              ? `Derivado de tu fecha de nacimiento (${birthDate}).`
-              : 'Completa tu fecha de nacimiento para calcularlo automáticamente.',
-          },
-          {
-            number: birthdayNumber != null ? String(birthdayNumber) : '—',
-            label: 'Número de Nacimiento',
-            desc: birthdayNumber != null ? `Reduce el día ${birthParts?.day} a vibración esencial.` : 'Disponible cuando registres una fecha válida.',
-          },
-          {
-            number: attitudeNumber != null ? String(attitudeNumber) : '—',
-            label: 'Número de Actitud',
-            desc: attitudeNumber != null ? `Suma mes + día (${birthParts?.month} + ${birthParts?.day}).` : 'Disponible cuando registres una fecha válida.',
-          },
-          {
-            number: personalYear != null ? String(personalYear) : '—',
-            label: `Año Personal ${currentYear}`,
-            desc: personalYear != null ? 'Marca la energía del año en curso para tus decisiones.' : 'Disponible cuando registres una fecha válida.',
-          },
-          {
-            number: nameNumbers.expression != null ? String(nameNumbers.expression) : '—',
-            label: 'Número de Expresión',
-            desc: nameNumbers.expression != null ? 'Calculado con letras de tu nombre completo.' : 'Disponible cuando tengas nombre válido en tu perfil.',
-          },
-          {
-            number: nameNumbers.soulUrge != null ? String(nameNumbers.soulUrge) : '—',
-            label: 'Número del Alma',
-            desc: nameNumbers.soulUrge != null ? 'Derivado de vocales de tu nombre.' : 'Disponible cuando tengas nombre válido en tu perfil.',
-          },
-          {
-            number: nameNumbers.personality != null ? String(nameNumbers.personality) : '—',
-            label: 'Número de Personalidad',
-            desc: nameNumbers.personality != null ? 'Derivado de consonantes de tu nombre.' : 'Disponible cuando tengas nombre válido en tu perfil.',
-          },
-        ],
-        interpretations: [
-          {
-            id: 'camino',
-            title: `Camino de Vida ${lifePath ?? '—'}`,
-            content: lifePath
-              ? `Tu Camino de Vida ${lifePath} enfatiza ${numberMeaning(lifePath)}. En la práctica, este número sugiere cómo avanzar con más coherencia personal.`
-              : 'Completa una fecha de nacimiento válida para desbloquear esta interpretación.',
-          },
-          {
-            id: 'nacimiento',
-            title: `Número de Nacimiento ${birthdayNumber ?? '—'}`,
-            content: birthdayNumber != null
-              ? `Tu número de nacimiento aporta un talento natural orientado a ${numberMeaning(birthdayNumber)}.`
-              : 'Disponible cuando registres una fecha de nacimiento válida.',
-          },
-          {
-            id: 'actitud',
-            title: `Actitud ${attitudeNumber ?? '—'}`,
-            content: attitudeNumber != null
-              ? `Este número describe tu primera impresión y enfoque espontáneo: ${numberMeaning(attitudeNumber)}.`
-              : 'Disponible cuando registres una fecha de nacimiento válida.',
-          },
-          {
-            id: 'anio',
-            title: `Año Personal ${currentYear}: ${personalYear ?? '—'}`,
-            content: personalYear != null
-              ? `Durante ${currentYear}, predomina una energía asociada a ${numberMeaning(personalYear)}. Úsala para priorizar decisiones y ritmo.`
-              : 'Disponible cuando registres una fecha de nacimiento válida.',
-          },
-          {
-            id: 'nombre',
-            title: 'Eje del Nombre (Expresión/Alma/Personalidad)',
-            content:
-              nameNumbers.expression != null && nameNumbers.soulUrge != null && nameNumbers.personality != null
-                ? `Expresión ${nameNumbers.expression}: ${numberMeaning(nameNumbers.expression)}. Alma ${nameNumbers.soulUrge}: ${numberMeaning(nameNumbers.soulUrge)}. Personalidad ${nameNumbers.personality}: ${numberMeaning(nameNumbers.personality)}.`
-                : 'Con un nombre completo válido, este eje mostrará cómo comunicas tu potencial, tu motivación interna y tu forma de presentarte.',
-          },
-          {
-            id: 'integracion',
-            title: 'Claves de integración',
-            content:
-              'Integra tus números en acciones concretas: define 1 prioridad mensual, 1 hábito sostenible y 1 criterio de decisión alineado con tu ciclo personal.',
-          },
-        ],
-      }),
-    };
+    try {
+      const comp = await client.numerology.getComprehensiveReport({ subject });
+      const core = comp.core_numbers;
+      const currentYear = new Date().getFullYear();
+      const numbers = [
+        this.mapNumerologyNumber(core?.life_path, 'Camino de Vida'),
+        this.mapNumerologyNumber(core?.birthday, 'Número de Nacimiento'),
+        this.mapNumerologyNumber(core?.maturity, 'Número de Madurez'),
+        this.mapNumerologyNumber(comp.personal_year, `Año Personal ${currentYear}`),
+        this.mapNumerologyNumber(core?.expression, 'Número de Expresión'),
+        this.mapNumerologyNumber(core?.soul_urge, 'Número del Alma'),
+        this.mapNumerologyNumber(core?.personality, 'Número de Personalidad'),
+      ];
+      const interpText = typeof comp.interpretation === 'string' ? comp.interpretation.trim() : '';
+      const interpretations: { id: string; title: string; content: string }[] = [];
+      if (interpText) {
+        interpretations.push({
+          id: 'proveedor',
+          title: 'Síntesis (Astrology API)',
+          content: interpText.slice(0, 12000),
+        });
+      }
+      return {
+        title: 'Numerología',
+        content: JSON.stringify({
+          provider: 'astroapi',
+          version: 1,
+          kind: 'numerology',
+          numbers,
+          interpretations,
+        }),
+      };
+    } catch (err) {
+      const astroErr = AstrologyError.normalize(err);
+      this.logger.warn(`AstroAPI numerology draft failed: ${astroErr.message}`);
+      return this.buildReportDraftWithoutApi(type, user, 'api_error', astroErr.message);
+    }
   }
 
   /**
@@ -1088,7 +1221,7 @@ export class PaymentsService {
 
     for (const type of requiredTypes) {
       const latest = latestByType.get(type);
-      const draft = this.buildReportDraft(type, user);
+      const draft = await this.buildReportDraft(type, user);
       if (!latest) {
         await this.prisma.report.create({
           data: {

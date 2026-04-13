@@ -7,7 +7,21 @@ import { UserResponse } from './user.interface';
 export class UsersService {
   constructor(private prisma: PrismaService) {}
 
-  private toResponse(user: { id: string; email: string; name: string; role: string; isActive: boolean; subscriptionStatus: string; avatarUrl?: string | null }): UserResponse {
+  private toResponse(user: {
+    id: string;
+    email: string;
+    name: string;
+    role: string;
+    isActive: boolean;
+    subscriptionStatus: string;
+    avatarUrl?: string | null;
+    birthDate?: string | null;
+    birthPlace?: string | null;
+    birthTime?: string | null;
+    birthLat?: number | null;
+    birthLon?: number | null;
+    birthTimezone?: string | null;
+  }): UserResponse {
     return {
       id: user.id,
       email: user.email,
@@ -16,6 +30,12 @@ export class UsersService {
       isActive: user.isActive,
       subscriptionStatus: user.subscriptionStatus as UserResponse['subscriptionStatus'],
       avatarUrl: user.avatarUrl ?? null,
+      birthDate: user.birthDate ?? null,
+      birthPlace: user.birthPlace ?? null,
+      birthTime: user.birthTime ?? null,
+      birthLat: user.birthLat ?? null,
+      birthLon: user.birthLon ?? null,
+      birthTimezone: user.birthTimezone ?? null,
     };
   }
 
@@ -29,6 +49,9 @@ export class UsersService {
     birthDate?: string;
     birthPlace?: string;
     birthTime?: string;
+    birthLat?: number;
+    birthLon?: number;
+    birthTimezone?: string;
   }): Promise<UserResponse> {
     const normalizedEmail = data.email.trim().toLowerCase();
     const existing = await this.prisma.user.findUnique({ where: { email: normalizedEmail } });
@@ -47,6 +70,9 @@ export class UsersService {
         birthDate: data.birthDate ?? null,
         birthPlace: data.birthPlace ?? null,
         birthTime: data.birthTime ?? null,
+        birthLat: typeof data.birthLat === 'number' && Number.isFinite(data.birthLat) ? data.birthLat : null,
+        birthLon: typeof data.birthLon === 'number' && Number.isFinite(data.birthLon) ? data.birthLon : null,
+        birthTimezone: typeof data.birthTimezone === 'string' && data.birthTimezone.trim().length > 0 ? data.birthTimezone.trim() : null,
       },
     });
     return this.toResponse(user);
@@ -68,7 +94,21 @@ export class UsersService {
     return bcrypt.compare(password, user.passwordHash);
   }
 
-  toPublic(user: { id: string; email: string; name: string; role: string; isActive: boolean; subscriptionStatus: string; avatarUrl?: string | null }): UserResponse {
+  toPublic(user: {
+    id: string;
+    email: string;
+    name: string;
+    role: string;
+    isActive: boolean;
+    subscriptionStatus: string;
+    avatarUrl?: string | null;
+    birthDate?: string | null;
+    birthPlace?: string | null;
+    birthTime?: string | null;
+    birthLat?: number | null;
+    birthLon?: number | null;
+    birthTimezone?: string | null;
+  }): UserResponse {
     return this.toResponse(user);
   }
 
@@ -172,12 +212,32 @@ export class UsersService {
 
   async updateProfile(
     userId: string,
-    data: { name?: string; email?: string; birthDate?: string; birthPlace?: string; birthTime?: string; avatarUrl?: string },
+    data: {
+      name?: string;
+      email?: string;
+      birthDate?: string;
+      birthPlace?: string;
+      birthTime?: string;
+      birthLat?: number;
+      birthLon?: number;
+      birthTimezone?: string;
+      avatarUrl?: string;
+    },
   ): Promise<UserResponse> {
     const existing = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!existing) throw new UnauthorizedException('User not found');
 
-    const updateData: { name?: string; email?: string; birthDate?: string | null; birthPlace?: string | null; birthTime?: string | null; avatarUrl?: string | null } = {};
+    const updateData: {
+      name?: string;
+      email?: string;
+      birthDate?: string | null;
+      birthPlace?: string | null;
+      birthTime?: string | null;
+      birthLat?: number | null;
+      birthLon?: number | null;
+      birthTimezone?: string | null;
+      avatarUrl?: string | null;
+    } = {};
     if (typeof data.name === 'string' && data.name.trim()) {
       updateData.name = data.name.trim();
     }
@@ -200,6 +260,16 @@ export class UsersService {
     if (typeof data.birthTime === 'string') {
       const trimmed = data.birthTime.trim();
       updateData.birthTime = trimmed.length > 0 ? trimmed : null;
+    }
+    if (typeof data.birthLat === 'number' && Number.isFinite(data.birthLat)) {
+      updateData.birthLat = data.birthLat;
+    }
+    if (typeof data.birthLon === 'number' && Number.isFinite(data.birthLon)) {
+      updateData.birthLon = data.birthLon;
+    }
+    if (typeof data.birthTimezone === 'string') {
+      const trimmed = data.birthTimezone.trim();
+      updateData.birthTimezone = trimmed.length > 0 ? trimmed : null;
     }
     if (typeof data.avatarUrl === 'string') {
       const trimmed = data.avatarUrl.trim();

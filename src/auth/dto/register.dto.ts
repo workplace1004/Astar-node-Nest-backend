@@ -1,4 +1,4 @@
-import { IsEmail, IsNotEmpty, IsString, MinLength, Matches } from 'class-validator';
+import { IsEmail, IsNotEmpty, IsNumber, IsOptional, IsString, MinLength, Matches } from 'class-validator';
 
 export class RegisterDto {
   @IsString()
@@ -22,4 +22,17 @@ export class RegisterDto {
 
   @Matches(/^\d{2}:\d{2}$/)
   birthTime!: string;
+
+  /** Required to generate reports via Astrology API (AstroAPI). */
+  @IsNumber()
+  birthLat!: number;
+
+  /** Required to generate reports via Astrology API (AstroAPI). */
+  @IsNumber()
+  birthLon!: number;
+
+  /** IANA timezone, e.g. "America/Argentina/Buenos_Aires". */
+  @IsString()
+  @IsNotEmpty()
+  birthTimezone!: string;
 }

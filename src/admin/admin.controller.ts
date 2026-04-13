@@ -42,6 +42,9 @@ export class AdminController {
       birthDate: user.birthDate,
       birthPlace: user.birthPlace,
       birthTime: user.birthTime,
+      birthLat: (user as unknown as { birthLat?: number | null }).birthLat ?? null,
+      birthLon: (user as unknown as { birthLon?: number | null }).birthLon ?? null,
+      birthTimezone: (user as unknown as { birthTimezone?: string | null }).birthTimezone ?? null,
       createdAt: user.createdAt.toISOString(),
     };
   }

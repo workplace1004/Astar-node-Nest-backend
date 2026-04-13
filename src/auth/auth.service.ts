@@ -27,6 +27,9 @@ export class AuthService {
       birthDate: dto.birthDate,
       birthPlace: dto.birthPlace,
       birthTime: dto.birthTime,
+      birthLat: dto.birthLat,
+      birthLon: dto.birthLon,
+      birthTimezone: dto.birthTimezone,
     });
     const token = this.jwtService.sign({ sub: user.id, email: user.email });
     return { user, access_token: token };

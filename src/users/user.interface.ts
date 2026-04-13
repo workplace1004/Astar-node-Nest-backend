@@ -11,6 +11,9 @@ export interface User {
   birthDate?: string;
   birthPlace?: string;
   birthTime?: string;
+  birthLat?: number;
+  birthLon?: number;
+  birthTimezone?: string;
   avatarUrl?: string;
 }
 
@@ -22,4 +25,10 @@ export interface UserResponse {
   isActive: boolean;
   subscriptionStatus: SubscriptionStatus;
   avatarUrl?: string | null;
+  birthDate?: string | null;
+  birthPlace?: string | null;
+  birthTime?: string | null;
+  birthLat?: number | null;
+  birthLon?: number | null;
+  birthTimezone?: string | null;
 }
