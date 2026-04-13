@@ -55,9 +55,10 @@ const SUBSCRIPTION_CATALOG: Record<Plan, { title: string; usd: Record<Billing, n
     ars: { monthly: 19000, annual: 13000 },
   },
   portal: {
-    title: 'Astar Portal',
-    usd: { monthly: 39, annual: 29 },
-    ars: { monthly: 39000, annual: 29000 },
+    title: 'Astar Portal completo',
+    /** Alineado con landing: 29 USD/mes o pago anual (19 USD/mes × 12). */
+    usd: { monthly: 29, annual: 228 },
+    ars: { monthly: 42050, annual: 330600 },
   },
   depth: {
     title: 'Astar Depth',
@@ -1049,8 +1050,10 @@ export class PaymentsService {
    */
   async syncSubscriptionReportsIfNeeded(userId: string): Promise<void> {
     const user = await this.usersService.findById(userId);
-    if (!user || user.subscriptionStatus !== 'active') return;
-    const plan = await this.inferSubscriptionPlanFromOrders(userId);
+    if (!user) return;
+    const isAdmin = user.role === 'admin';
+    if (!isAdmin && user.subscriptionStatus !== 'active') return;
+    const plan = isAdmin ? undefined : await this.inferSubscriptionPlanFromOrders(userId);
     await this.ensureSubscriptionReports(userId, plan);
   }
 
