@@ -269,6 +269,21 @@ export class PortalService {
     if (!questionText || questionText.length < 1) {
       throw new ForbiddenException('Question text is required');
     }
+    const now = new Date();
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const nextMonthStart = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    const monthlyCount = await this.prisma.question.count({
+      where: {
+        userId,
+        createdAt: {
+          gte: monthStart,
+          lt: nextMonthStart,
+        },
+      },
+    });
+    if (monthlyCount >= 1) {
+      throw new ForbiddenException('Ya usaste tu pregunta mensual. Se renueva el 1 de cada mes.');
+    }
     const question = await this.prisma.question.create({
       data: {
         userId,
