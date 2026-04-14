@@ -5,9 +5,10 @@ import { PaymentsController } from './payments.controller';
 import { PaymentsService } from './payments.service';
 import { UsersModule } from '../users/users.module';
 import { PrismaModule } from '../prisma/prisma.module';
+import { ExchangeModule } from '../exchange/exchange.module';
 
 @Module({
-  imports: [UsersModule, PrismaModule],
+  imports: [UsersModule, PrismaModule, ExchangeModule],
   controllers: [PaymentsController, MercadoPagoWebhookController, PayPalWebhookController],
   providers: [PaymentsService],
   exports: [PaymentsService],

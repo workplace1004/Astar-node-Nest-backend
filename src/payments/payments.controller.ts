@@ -11,7 +11,7 @@ export class PaymentsController {
   @Post('subscription/checkout')
   async createSubscriptionCheckout(
     @CurrentUser() user: { id: string },
-    @Body() body: { provider: 'mercadopago' | 'paypal'; plan: 'essentials' | 'portal' | 'depth'; billing: 'monthly' | 'annual' },
+    @Body() body: { provider: 'mercadopago' | 'paypal'; plan: 'portal'; billing: 'monthly' | 'annual' },
   ) {
     return this.paymentsService.createSubscriptionCheckout(user.id, body);
   }
@@ -38,7 +38,7 @@ export class PaymentsController {
     @Body()
     body: {
       flow: 'subscription' | 'extras_cart';
-      plan?: 'essentials' | 'portal' | 'depth';
+      plan?: 'portal';
       billing?: 'monthly' | 'annual';
       token: string;
       issuerId?: string;

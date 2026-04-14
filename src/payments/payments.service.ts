@@ -17,10 +17,12 @@ import {
 } from '../common/astroapi-chart-parse';
 import { PrismaService } from '../prisma/prisma.service';
 import { UsersService } from '../users/users.service';
+import { ExchangeService } from '../exchange/exchange.service';
 
 type Provider = 'mercadopago' | 'paypal';
 type Billing = 'monthly' | 'annual';
-type Plan = 'essentials' | 'portal' | 'depth';
+/** Único plan de pago: Portal completo. Essentials es gratuito. */
+type PaidCheckoutPlan = 'portal';
 type ExtraType = 'extra_question' | 'private_session';
 type ReportType = 'birth_chart' | 'solar_return' | 'numerology';
 
@@ -45,7 +47,7 @@ export interface CheckoutResult {
 
 interface SubscriptionCheckoutInput {
   provider: Provider;
-  plan: Plan;
+  plan: PaidCheckoutPlan;
   billing: Billing;
 }
 
@@ -57,31 +59,19 @@ interface ExtraCheckoutInput {
 
 const FRONTEND_BASE = (process.env.FRONTEND_URL ?? 'http://localhost:5173').replace(/\/$/, '');
 
-const SUBSCRIPTION_CATALOG: Record<Plan, { title: string; usd: Record<Billing, number>; ars: Record<Billing, number> }> = {
-  essentials: {
-    title: 'Astar Essentials',
-    usd: { monthly: 19, annual: 15 },
-    ars: { monthly: 19000, annual: 13000 },
-  },
-  portal: {
-    title: 'Astar Portal completo',
-    /** Alineado con landing: 29 USD/mes o pago anual (19 USD/mes × 12). */
-    usd: { monthly: 29, annual: 228 },
-    ars: { monthly: 42050, annual: 330600 },
-  },
-  depth: {
-    title: 'Astar Depth',
-    usd: { monthly: 79, annual: 59 },
-    ars: { monthly: 79000, annual: 59000 },
-  },
+const PORTAL_SUBSCRIPTION_TITLE = 'Astar Portal completo';
+/** USD: mensual 29; anual = 12 meses con 20% sobre el mensual, importe entero (sin decimales). */
+const PORTAL_SUBSCRIPTION_USD: Record<Billing, number> = {
+  monthly: 29,
+  annual: Math.round(29 * 12 * 0.8),
 };
 
-const EXTRAS_CATALOG: Record<ExtraType, { title: string; usd: number; ars: number }> = {
-  extra_question: { title: 'Pregunta extra', usd: 12, ars: 12000 },
-  private_session: { title: 'Sesión privada', usd: 45, ars: 43000 },
+const EXTRAS_CATALOG: Record<ExtraType, { title: string; usd: number }> = {
+  extra_question: { title: 'Pregunta extra', usd: 12 },
+  private_session: { title: 'Sesión privada', usd: 45 },
 };
 
-/** Portal extras catalog (USD); ARS for Mercado Pago ≈ usd * 1450. Keep aligned with frontend `extraServicesCatalog`. */
+/** Portal extras catalog (USD). ARS en checkout vía `ExchangeService`. Alineado con `extraServicesCatalog` del frontend. */
 const PORTAL_EXTRA_SERVICES: Record<string, { title: string; usdGuest: number; usdSub: number }> = {
   'momento-actual': { title: 'Lectura de tu momento actual + preguntas', usdGuest: 210, usdSub: 105 },
   'energia-interna': { title: 'Tu energía interna vs la que estás mostrando', usdGuest: 110, usdSub: 55 },
@@ -93,6 +83,11 @@ const PORTAL_EXTRA_SERVICES: Record<string, { title: string; usdGuest: number; u
   'solar-vivo': { title: 'Lectura en vivo de tu revolución solar', usdGuest: 540, usdSub: 270 },
   'tres-preguntas': { title: '3 preguntas (respondo integrando todas mis herramientas)', usdGuest: 70, usdSub: 35 },
 };
+
+/** Códigos que pueden figurar en pedidos `subscription:*` ya existentes (PayPal / Mercado Pago). */
+function isFulfillableSubscriptionPlanKey(plan: string): boolean {
+  return plan === 'portal' || plan === 'essentials';
+}
 
 function encodeExternalReference(input: Record<string, string>): string {
   return Buffer.from(JSON.stringify(input)).toString('base64url');
@@ -137,7 +132,17 @@ export class PaymentsService {
   constructor(
     private prisma: PrismaService,
     private usersService: UsersService,
+    private exchange: ExchangeService,
   ) {}
+
+  private async usdToArsRounded(usd: number): Promise<number> {
+    const { arsPerUsd } = await this.exchange.getUsdToArsRate();
+    return Math.round(usd * arsPerUsd);
+  }
+
+  private async portalSubscriptionArs(billing: Billing): Promise<number> {
+    return this.usdToArsRounded(PORTAL_SUBSCRIPTION_USD[billing]);
+  }
 
   private async requireClient(userId: string) {
     const user = await this.usersService.findById(userId);
@@ -189,18 +194,19 @@ export class PaymentsService {
   async createSubscriptionCheckout(userId: string, input: SubscriptionCheckoutInput): Promise<CheckoutResult> {
     const user = await this.requireClient(userId);
 
-    const config = SUBSCRIPTION_CATALOG[input.plan];
-    if (!config) throw new BadRequestException('Invalid plan');
+    if (input.plan !== 'portal') {
+      throw new BadRequestException('Solo el plan Portal admite pago; Essentials es gratuito.');
+    }
 
     if (input.provider === 'paypal') {
-      return this.createPayPalSubscriptionOrder(user, input.plan, input.billing);
+      return this.createPayPalSubscriptionOrder(user, input.billing);
     }
 
     if (input.provider !== 'mercadopago') throw new BadRequestException('Invalid provider');
 
     if (!process.env.MERCADOPAGO_ACCESS_TOKEN) throw new BadRequestException('Missing MERCADOPAGO_ACCESS_TOKEN');
     const accessToken = this.getMercadoPagoToken();
-    const amount = config.ars[input.billing];
+    const amount = await this.portalSubscriptionArs(input.billing);
     const externalReference = encodeExternalReference({
       userId,
       paymentKind: 'subscription',
@@ -218,7 +224,7 @@ export class PaymentsService {
       body: JSON.stringify({
         items: [
           {
-            title: `${config.title} (${input.billing === 'monthly' ? 'Mensual' : 'Anual'})`,
+            title: `${PORTAL_SUBSCRIPTION_TITLE} (${input.billing === 'monthly' ? 'Mensual' : 'Anual'})`,
             quantity: 1,
             currency_id: 'ARS',
             unit_price: amount,
@@ -254,6 +260,7 @@ export class PaymentsService {
     const extra = EXTRAS_CATALOG[input.extraType];
     if (!extra) throw new BadRequestException('Invalid extraType');
     const quantity = Math.max(1, Math.min(10, Number(input.quantity ?? 1)));
+    const unitArs = await this.usdToArsRounded(extra.usd);
 
     const accessToken = this.getMercadoPagoToken();
     const externalReference = encodeExternalReference({
@@ -276,7 +283,7 @@ export class PaymentsService {
             title: extra.title,
             quantity,
             currency_id: 'ARS',
-            unit_price: extra.ars,
+            unit_price: unitArs,
           },
         ],
         external_reference: externalReference,
@@ -365,15 +372,13 @@ export class PaymentsService {
 
   private async createPayPalSubscriptionOrder(
     user: { id: string; email: string; name: string },
-    plan: Plan,
     billing: Billing,
   ): Promise<CheckoutResult> {
-    const config = SUBSCRIPTION_CATALOG[plan];
-    const amount = config.usd[billing];
+    const amount = PORTAL_SUBSCRIPTION_USD[billing];
     const valueStr = amount.toFixed(2);
     const label = billing === 'monthly' ? 'Mensual' : 'Anual';
-    const itemName = `${config.title} (${label})`.slice(0, 127);
-    const referenceId = `subscription:${plan}:${billing}`;
+    const itemName = `${PORTAL_SUBSCRIPTION_TITLE} (${label})`.slice(0, 127);
+    const referenceId = `subscription:portal:${billing}`;
 
     const token = await this.getPayPalAccessToken();
     const base = this.getPayPalApiBase();
@@ -446,7 +451,7 @@ export class PaymentsService {
       const p = PORTAL_EXTRA_SERVICES[id];
       if (!p) throw new BadRequestException('Carrito inválido');
       const usd = isSub ? p.usdSub : p.usdGuest;
-      const ars = Math.round(usd * 1450);
+      const ars = await this.usdToArsRounded(usd);
       lines.push({ id, title: p.title, usd, ars });
     }
     const totalUsd = lines.reduce((s, l) => s + l.usd, 0);
@@ -536,9 +541,9 @@ export class PaymentsService {
     if (referenceId.startsWith('subscription:')) {
       const parts = referenceId.split(':');
       if (parts.length !== 3) throw new BadRequestException('Invalid PayPal subscription order');
-      const plan = parts[1] as Plan;
+      const plan = parts[1];
       const billing = parts[2] as Billing;
-      if (!SUBSCRIPTION_CATALOG[plan] || (billing !== 'monthly' && billing !== 'annual')) {
+      if (!isFulfillableSubscriptionPlanKey(plan) || (billing !== 'monthly' && billing !== 'annual')) {
         throw new BadRequestException('Invalid subscription metadata on PayPal order');
       }
       const type = `subscription:${plan}:${billing}`;
@@ -762,11 +767,11 @@ export class PaymentsService {
   }
 
   private getReportTypesForPlan(plan: string | undefined): ReportType[] {
-    const normalized = (plan ?? '').toLowerCase() as Plan | '';
+    const normalized = (plan ?? '').toLowerCase();
     if (normalized === 'essentials') {
       return ['birth_chart', 'numerology'];
     }
-    // Portal and Depth get all core reports.
+    // Portal, Depth (histórico) o suscripción activa sin código: todos los informes base.
     return ['birth_chart', 'solar_return', 'numerology'];
   }
 
@@ -1179,7 +1184,7 @@ export class PaymentsService {
 
   /**
    * Si el usuario tiene suscripción activa y aún no tiene filas de reporte (p. ej. pago confirmado sin webhook),
-   * crea los borradores base. El plan se infiere del último pedido `subscription:…` si existe; si no, conjunto portal/depth.
+   * crea los borradores base. El plan se infiere del último pedido `subscription:…` si existe; si no, conjunto completo (portal).
    */
   async syncSubscriptionReportsIfNeeded(userId: string): Promise<void> {
     const user = await this.usersService.findById(userId);
@@ -1306,7 +1311,7 @@ export class PaymentsService {
     userId: string,
     input: {
       flow: 'subscription' | 'extras_cart';
-      plan?: Plan;
+      plan?: PaidCheckoutPlan;
       billing?: Billing;
       token: string;
       issuerId?: string;
@@ -1329,11 +1334,11 @@ export class PaymentsService {
     };
 
     if (input.flow === 'subscription') {
-      if (!input.plan || !input.billing) throw new BadRequestException('plan and billing are required');
-      const config = SUBSCRIPTION_CATALOG[input.plan];
-      if (!config) throw new BadRequestException('Invalid plan');
-      expectedAmount = config.ars[input.billing];
-      description = `${config.title} (${input.billing === 'monthly' ? 'Mensual' : 'Anual'})`;
+      if (input.plan !== 'portal' || !input.billing) {
+        throw new BadRequestException('plan and billing are required (solo plan portal)');
+      }
+      expectedAmount = await this.portalSubscriptionArs(input.billing);
+      description = `${PORTAL_SUBSCRIPTION_TITLE} (${input.billing === 'monthly' ? 'Mensual' : 'Anual'})`;
       externalReference = encodeExternalReference({
         userId,
         paymentKind: 'subscription',
@@ -1359,7 +1364,7 @@ export class PaymentsService {
         const p = PORTAL_EXTRA_SERVICES[id];
         if (!p) throw new BadRequestException('Carrito inválido');
         const usd = isSub ? p.usdSub : p.usdGuest;
-        const ars = Math.round(usd * 1450);
+        const ars = await this.usdToArsRounded(usd);
         lines.push({ title: p.title, ars });
         totalArs += ars;
       }
