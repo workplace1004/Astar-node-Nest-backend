@@ -1,4 +1,4 @@
-import { Injectable, ForbiddenException } from '@nestjs/common';
+import { Injectable, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { UsersService } from '../users/users.service';
 import { PaymentsService } from '../payments/payments.service';
@@ -269,20 +269,18 @@ export class PortalService {
     if (!questionText || questionText.length < 1) {
       throw new ForbiddenException('Question text is required');
     }
-    const now = new Date();
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
-    const nextMonthStart = new Date(now.getFullYear(), now.getMonth() + 1, 1);
-    const monthlyCount = await this.prisma.question.count({
+    const monthStartUtc = new Date();
+    monthStartUtc.setUTCDate(1);
+    monthStartUtc.setUTCHours(0, 0, 0, 0);
+    const alreadyAskedThisMonth = await this.prisma.question.findFirst({
       where: {
         userId,
-        createdAt: {
-          gte: monthStart,
-          lt: nextMonthStart,
-        },
+        createdAt: { gte: monthStartUtc },
       },
+      select: { id: true },
     });
-    if (monthlyCount >= 1) {
-      throw new ForbiddenException('Ya usaste tu pregunta mensual. Se renueva el 1 de cada mes.');
+    if (alreadyAskedThisMonth) {
+      throw new BadRequestException('Ya usaste tu pregunta mensual. Se renueva el 1 de cada mes.');
     }
     const question = await this.prisma.question.create({
       data: {
